@@ -1,4 +1,4 @@
-# ChangeDetection - Satellite Image Change Detection
+# ChangesDetector - Satellite Image Change Detection
 
 A research project exploring automated change detection between georeferenced satellite images, delivered as a QGIS plugin.
 
@@ -76,7 +76,7 @@ DINO3CD uses DINOv3 (a Vision Foundation Model pre-trained on large-scale divers
 Clone the repository and run the installer:
 
 ```bash
-git clone <your-repo-url>
+git clone https://github.com/ja1902/ChangesDetector.git
 cd ChangeDetection
 ```
 
@@ -115,7 +115,7 @@ The installer will:
 
 ### Manual Weight Download
 
-If the installer cannot download weights automatically, download them from the [GitHub Releases page](https://github.com/ja1902/ChangeDetection/releases) and place in the project root:
+If the installer cannot download weights automatically, download them from the [GitHub Releases page](https://github.com/ja1902/ChangesDetector/releases/tag/0.1.0) and place in the project root:
 
 - `MambaBCD_Small_LEVIRCD+.pth` (207 MB)
 - `MambaBCD_Small_SYSU.pth` (207 MB)
