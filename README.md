@@ -115,7 +115,7 @@ The installer will:
 
 ### Manual Weight Download
 
-If the installer cannot download weights automatically, download them from the [GitHub Releases page](https://github.com/ja1902/ChangesDetector/releases/tag/0.1.0) and place in the project root:
+If the installer cannot download weights automatically, download them from the [GitHub Releases page](https://github.com/ja1902/ChangesDetector/releases/tag/v0.1.0) and place in the project root:
 
 - `MambaBCD_Small_LEVIRCD+.pth` (207 MB)
 - `MambaBCD_Small_SYSU.pth` (207 MB)
