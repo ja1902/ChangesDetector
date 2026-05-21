@@ -1,0 +1,21 @@
+venv/
+**/__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+
+# Model weights (downloaded by install scripts)
+**/*.pth
+**/*.pt
+**/*.ckpt
+
+# Generated notebooks and training artifacts
+PeftCD-master/**/*.ipynb
+PeftCD-master/work_dirs/
+
+# Generated at install time with local paths
+uchange_qgis_plugin/_env_config.py
+
+# OS / IDE
+.DS_Store
+.claude/
