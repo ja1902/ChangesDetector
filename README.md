@@ -132,6 +132,16 @@ python detect_changes.py --before path/to/before.tif --after path/to/after.tif
 
 Options: `--threshold 0.3`, `--overlap 64`, `--tile-size 256`, `--weights path/to/weights.pth`
 
+### How the virtual environment works with QGIS
+
+QGIS has its own built-in Python interpreter - when you run a plugin, it always uses that interpreter. The virtual environment created by the installer does **not** replace QGIS's Python; it is only used as a **package library**.
+
+When the plugin needs to import a heavy dependency like PyTorch or transformers, it adds the venv's `site-packages` folder to Python's search path (`sys.path`) at runtime. This makes QGIS's Python find and load packages from the venv as if they were installed normally.
+
+**Why not just pip install into QGIS's Python?** QGIS ships a minimal Python environment. Installing lots of packages directly into it risks version conflicts and makes uninstalling the plugin messy. A separate venv keeps everything isolated - remove the `venv/` folder and the plugin's dependencies are gone.
+
+**In short:** QGIS's Python runs the code, the venv stores the packages, and `sys.path` connects the two.
+
 ## Troubleshooting
 
 **Plugin doesn't appear in QGIS:**
