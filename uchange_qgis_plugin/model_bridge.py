@@ -1,6 +1,7 @@
 import os
 import sys
 import glob
+import ctypes
 
 import numpy as np
 
@@ -30,63 +31,59 @@ def _ensure_venv_on_path():
             sys.path.insert(0, sp)
 
 
+def _preload_scipy_openblas():
+    """Preload scipy's bundled OpenBLAS .so before scipy is imported.
+
+    scipy wheels bundle their own OpenBLAS in a ``scipy.libs/`` directory
+    next to the ``scipy/`` package.  When running inside QGIS the dynamic
+    linker cannot find it because LD_LIBRARY_PATH does not include that
+    directory.  Force-loading the library with ctypes makes the symbols
+    available for all subsequent imports."""
+    for sp in sys.path:
+        libs_dir = os.path.join(sp, "scipy.libs")
+        if not os.path.isdir(libs_dir):
+            continue
+        for so in sorted(glob.glob(os.path.join(libs_dir, "libscipy_openblas*.so"))):
+            try:
+                ctypes.cdll.LoadLibrary(so)
+            except OSError:
+                pass
+
+
 _ensure_venv_on_path()
+_preload_scipy_openblas()
 
 import torch
 
 _PLUGIN_DIR = os.path.realpath(os.path.dirname(__file__))
 _PROJECT_ROOT = os.path.normpath(os.path.join(_PLUGIN_DIR, ".."))
-_CHANGEMAMBA_ROOT = os.path.join(_PROJECT_ROOT, "ChangeMamba")
-def _find_peftcd_root():
-    for dirpath, _, filenames in os.walk(os.path.join(_PROJECT_ROOT, "PeftCD-master")):
-        if "DINO3CD.py" in filenames:
-            return dirpath
-    return os.path.join(_PROJECT_ROOT, "PeftCD-master")
-
-_PEFTCD_ROOT = _find_peftcd_root()
+_OPENCD_ROOT = os.path.join(_PROJECT_ROOT, "open-cd-main")
 
 MODEL_REGISTRY = {
-    "MambaBCD - LEVIR-CD+ (buildings)":       {"file": "MambaBCD_Small_LEVIRCD+.pth",       "type": "mamba"},
-    "MambaBCD - SYSU (vegetation / general)":  {"file": "MambaBCD_Small_SYSU.pth", "type": "mamba"},
-    "PeftCD - LEVIR-CD+ (buildings)":          {"file": "PeftCD_LEVIRCD.ckpt",               "type": "peftcd"},
-    "PeftCD - SYSU (vegetation / general)":    {"file": "PeftCD_SYSU.ckpt",                  "type": "peftcd"},
+    "ChangerEx (R18) - LEVIR-CD (buildings)":  {"file": "ChangerEx_r18-512x512_40k_levircd.pth", "type": "opencd"},
 }
 
-DEFAULT_WEIGHTS = "MambaBCD_Small_LEVIRCD+.pth"
+DEFAULT_WEIGHTS = "ChangerEx_r18-512x512_40k_levircd.pth"
 
 _NORM_MEAN = np.array([0.485, 0.456, 0.406], dtype=np.float32)
 _NORM_STD = np.array([0.229, 0.224, 0.225], dtype=np.float32)
 
-_VSSM_COMMON = dict(
-    patch_size=4, in_chans=3, num_classes=1000,
-    ssm_d_state=1, ssm_ratio=2.0, ssm_rank_ratio=2.0,
-    ssm_dt_rank="auto", ssm_act_layer="silu",
-    ssm_conv=3, ssm_conv_bias=False, ssm_drop_rate=0.0,
-    ssm_init="v0", forward_type="v3noz",
-    mlp_ratio=4.0, mlp_act_layer="gelu", mlp_drop_rate=0.0,
-    patch_norm=True, norm_layer="ln",
-    downsample_version="v3", patchembed_version="v2",
-    gmlp=False, use_checkpoint=False,
-)
-
-VSSM_CONFIGS = {
-    "tiny":  {**_VSSM_COMMON, "depths": [2, 2, 4, 2],  "dims": 96,  "drop_path_rate": 0.2},
-    "small": {**_VSSM_COMMON, "depths": [2, 2, 15, 2], "dims": 96,  "drop_path_rate": 0.3},
-    "base":  {**_VSSM_COMMON, "depths": [2, 2, 15, 2], "dims": 128, "drop_path_rate": 0.6},
-}
-
 _model_cache = {}
 
 
-class PeftCDWrapper(torch.nn.Module):
-    """Wraps PeftCD model to average the two output logit tensors into one."""
+class OpenCDWrapper(torch.nn.Module):
+    """Wraps an Open-CD model to accept (pre, post) ImageNet-normalized RGB
+    tensors and return 2-class logits (B, 2, H, W)."""
     def __init__(self, model):
         super().__init__()
         self.model = model
 
     def forward(self, pre, post):
-        outs = self.model(pre, post)
-        return (outs[0] + outs[1]) / 2.0
+        B, C, H, W = pre.shape
+        inputs = torch.cat([pre, post], dim=1)
+        batch_img_metas = [{'ori_shape': (H, W), 'img_shape': (H, W),
+                           'pad_shape': (H, W), 'padding_size': [0, 0, 0, 0]}] * B
+        return self.model.encode_decode(inputs, batch_img_metas)
 
 
 def resolve_weights_path(display_name):
@@ -94,58 +91,6 @@ def resolve_weights_path(display_name):
     if entry is None:
         raise ValueError(f"Unknown model: {display_name}")
     return os.path.join(_PROJECT_ROOT, entry["file"])
-
-
-def _model_type_for_path(checkpoint_path):
-    """Determine model type from checkpoint extension."""
-    if checkpoint_path.endswith(".ckpt"):
-        return "peftcd"
-    return "mamba"
-
-
-def _ensure_changemamba_on_path():
-    if _CHANGEMAMBA_ROOT not in sys.path:
-        sys.path.insert(0, _CHANGEMAMBA_ROOT)
-
-
-def _detect_model_size(checkpoint_path):
-    name = os.path.basename(checkpoint_path).lower()
-    for size in ("tiny", "small", "base"):
-        if size in name:
-            return size
-    return "small"
-
-
-def _build_mamba_model(checkpoint_path, device):
-    _ensure_changemamba_on_path()
-    from changedetection.models.ChangeMambaBCD import ChangeMambaBCD
-    from changedetection.checkpoints import load_model_weights
-
-    size = _detect_model_size(checkpoint_path)
-    kwargs = VSSM_CONFIGS[size]
-
-    model = ChangeMambaBCD(pretrained=None, **kwargs)
-    load_info = load_model_weights(model, checkpoint_path)
-
-    total_keys = len(model.state_dict())
-    loaded = load_info["loaded_keys"]
-    missing = len(load_info["missing_keys"])
-    unexpected = len(load_info["unexpected_keys"])
-    mismatched = len(load_info["mismatched_keys"])
-
-    summary = (
-        f"Model: MambaBCD-{size.title()} | "
-        f"Checkpoint: {loaded}/{total_keys} keys loaded, "
-        f"{missing} missing, {unexpected} unexpected, {mismatched} mismatched"
-    )
-    if loaded == 0:
-        raise RuntimeError(
-            f"No weights loaded — architecture mismatch. "
-            f"First 5 unexpected: {load_info['unexpected_keys'][:5]}"
-        )
-
-    model.to(device).eval()
-    return model, summary
 
 
 def _import_with_standard_hook(*module_names):
@@ -177,39 +122,69 @@ def _patch_mmseg_version_check():
     mmcv.__version__ = real
 
 
-def _build_peftcd_model(checkpoint_path, device):
-    if _PEFTCD_ROOT not in sys.path:
-        sys.path.insert(0, _PEFTCD_ROOT)
+_OPENCD_CONFIG = "configs/changer/changer_ex_r18_512x512_40k_levircd.py"
 
-    _import_with_standard_hook('accelerate', 'transformers', 'peft')
-    _patch_mmseg_version_check()
 
-    prev_cwd = os.getcwd()
-    os.chdir(_PEFTCD_ROOT)
+def _ensure_scipy_optimize():
+    """Make sure ``from scipy.optimize import linear_sum_assignment`` won't
+    crash when mmseg.models is first imported.
+
+    mmseg's HungarianAssigner does a top-level ``from scipy.optimize import
+    linear_sum_assignment``.  If the venv's scipy is too new for the
+    available numpy (e.g. scipy >= 1.14 with numpy < 2.0), that import
+    crashes.  ChangerEx never uses HungarianAssigner, so a minimal stub
+    is safe."""
+    if 'scipy.optimize' in sys.modules:
+        return
     try:
-        from DINO3CD import DINO3CD
-        model = DINO3CD(peft_method='lora')
-    finally:
-        os.chdir(prev_cwd)
+        import scipy.optimize  # noqa: F401
+    except (ImportError, AttributeError):
+        import types
+        sys.modules.setdefault('scipy', types.ModuleType('scipy'))
+        opt = types.ModuleType('scipy.optimize')
+        opt.linear_sum_assignment = None
+        sys.modules['scipy.optimize'] = opt
 
-    ckpt = torch.load(checkpoint_path, map_location=device)
-    state_dict = ckpt.get('state_dict', ckpt)
 
-    cleaned = {}
-    for k, v in state_dict.items():
-        key = k[len('change_detection.'):] if k.startswith('change_detection.') else k
-        cleaned[key] = v
+def _build_opencd_model(checkpoint_path, device):
+    if _OPENCD_ROOT not in sys.path:
+        sys.path.insert(0, _OPENCD_ROOT)
 
-    model.load_state_dict(cleaned, strict=False)
+    from mmengine.config import Config
+    from mmengine.runner import load_checkpoint
+    from mmengine.model import revert_sync_batchnorm
+    from mmengine.registry import DefaultScope
+
+    _ensure_scipy_optimize()
+    _patch_mmseg_version_check()
+    _import_with_standard_hook(
+        'opencd.models.backbones.interaction_resnet',
+        'opencd.models.change_detectors.dual_input_encoder_decoder',
+        'opencd.models.decode_heads.changer',
+        'opencd.models.data_preprocessor',
+    )
+
+    cfg = Config.fromfile(os.path.join(_OPENCD_ROOT, _OPENCD_CONFIG))
+    if hasattr(cfg.model, "pretrained"):
+        cfg.model.pretrained = None
+    for attr in ("backbone", "image_encoder", "decode_head", "auxiliary_head"):
+        sub = getattr(cfg.model, attr, None)
+        if sub is not None and hasattr(sub, "init_cfg"):
+            sub.init_cfg = None
+
+    from opencd.registry import MODELS
+    DefaultScope.get_instance('opencd', scope_name='opencd')
+    model = MODELS.build(cfg.model)
+    load_checkpoint(model, checkpoint_path, map_location="cpu", logger=None)
+    model = revert_sync_batchnorm(model)
     model.to(device).eval()
 
-    wrapped = PeftCDWrapper(model)
+    wrapped = OpenCDWrapper(model)
     wrapped.eval()
 
     summary = (
-        f"Model: PeftCD (DINOv3+LoRA) | "
-        f"Checkpoint: {os.path.basename(checkpoint_path)} | "
-        f"Keys: {len(cleaned)}"
+        f"Model: ChangerEx (R18) | "
+        f"Checkpoint: {os.path.basename(checkpoint_path)}"
     )
     return wrapped, summary
 
@@ -222,11 +197,7 @@ def build_model(checkpoint_path, device=None):
     if cache_key in _model_cache:
         return _model_cache[cache_key], "Model loaded from cache"
 
-    model_type = _model_type_for_path(checkpoint_path)
-    if model_type == "peftcd":
-        model, summary = _build_peftcd_model(checkpoint_path, device)
-    else:
-        model, summary = _build_mamba_model(checkpoint_path, device)
+    model, summary = _build_opencd_model(checkpoint_path, device)
 
     _model_cache[cache_key] = model
     return model, summary

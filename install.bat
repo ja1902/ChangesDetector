@@ -71,57 +71,18 @@ if %errorlevel% equ 0 (
 echo.
 echo Downloading model weights...
 
-set "GITHUB_RELEASE=https://github.com/ja1902/ChangeDetection/releases/download/v0.1.0"
+set "GITHUB_RELEASE=https://github.com/ja1902/ChangesDetector/releases/download/v0.2.0"
 
-set "LEVIR_WEIGHTS=%SCRIPT_DIR%\MambaBCD_Small_LEVIRCD+.pth"
-if exist "%LEVIR_WEIGHTS%" (
-    echo LEVIR-CD+ weights already exist, skipping download.
+set "CHANGEREX_WEIGHTS=%SCRIPT_DIR%\ChangerEx_r18-512x512_40k_levircd.pth"
+if exist "%CHANGEREX_WEIGHTS%" (
+    echo ChangerEx weights already exist, skipping download.
 ) else (
-    echo Downloading MambaBCD-Small [LEVIR-CD+, ~207 MB]...
-    curl -L --fail --progress-bar -o "%LEVIR_WEIGHTS%" "%GITHUB_RELEASE%/MambaBCD_Small_LEVIRCD+.pth"
+    echo Downloading ChangerEx R18 [LEVIR-CD]...
+    curl -L --fail --progress-bar -o "%CHANGEREX_WEIGHTS%" "%GITHUB_RELEASE%/ChangerEx_r18-512x512_40k_levircd.pth"
     if !errorlevel! neq 0 (
-        del "%LEVIR_WEIGHTS%" 2>nul
+        del "%CHANGEREX_WEIGHTS%" 2>nul
         echo WARNING: Download failed. Please download manually.
-        echo          Place the file at: %LEVIR_WEIGHTS%
-    )
-)
-
-set "SYSU_WEIGHTS=%SCRIPT_DIR%\MambaBCD_Small_SYSU.pth"
-if exist "%SYSU_WEIGHTS%" (
-    echo SYSU weights already exist, skipping download.
-) else (
-    echo Downloading MambaBCD-Small [SYSU, ~207 MB]...
-    curl -L --fail --progress-bar -o "%SYSU_WEIGHTS%" "%GITHUB_RELEASE%/MambaBCD_Small_SYSU.pth"
-    if !errorlevel! neq 0 (
-        del "%SYSU_WEIGHTS%" 2>nul
-        echo WARNING: Download failed. Please download manually.
-        echo          Place the file at: %SYSU_WEIGHTS%
-    )
-)
-
-set "PEFTCD_LEVIR=%SCRIPT_DIR%\PeftCD_LEVIRCD.ckpt"
-if exist "%PEFTCD_LEVIR%" (
-    echo PeftCD LEVIR-CD+ weights already exist, skipping download.
-) else (
-    echo Downloading PeftCD [LEVIR-CD+]...
-    curl -L --fail --progress-bar -o "%PEFTCD_LEVIR%" "%GITHUB_RELEASE%/PeftCD_LEVIRCD.ckpt"
-    if !errorlevel! neq 0 (
-        del "%PEFTCD_LEVIR%" 2>nul
-        echo WARNING: Download failed. Please download manually.
-        echo          Place the file at: %PEFTCD_LEVIR%
-    )
-)
-
-set "PEFTCD_SYSU=%SCRIPT_DIR%\PeftCD_SYSU.ckpt"
-if exist "%PEFTCD_SYSU%" (
-    echo PeftCD SYSU weights already exist, skipping download.
-) else (
-    echo Downloading PeftCD [SYSU]...
-    curl -L --fail --progress-bar -o "%PEFTCD_SYSU%" "%GITHUB_RELEASE%/PeftCD_SYSU.ckpt"
-    if !errorlevel! neq 0 (
-        del "%PEFTCD_SYSU%" 2>nul
-        echo WARNING: Download failed. Please download manually.
-        echo          Place the file at: %PEFTCD_SYSU%
+        echo          Place the file at: %CHANGEREX_WEIGHTS%
     )
 )
 

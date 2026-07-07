@@ -59,7 +59,7 @@ class ChangeDetectionInferenceTask(QgsTask):
             return False
 
         self._log(f"Using device: {device}")
-        self._log("Building MambaBCD model...")
+        self._log("Building model...")
         model, load_summary = build_model(p["checkpoint_path"], device)
         self._log(load_summary)
         self.setProgress(20)

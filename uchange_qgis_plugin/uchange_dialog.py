@@ -286,7 +286,7 @@ class UChangeDialog(QDialog):
             )
 
         self._log(f"Using device: {device}")
-        self._log("Building MambaBCD model...")
+        self._log("Building model...")
         model, load_summary = build_model(self._get_weights_path(), device)
         self._log(load_summary)
         self._set_progress(20)

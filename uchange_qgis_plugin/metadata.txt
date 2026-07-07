@@ -1,14 +1,14 @@
 [general]
 name=ChangeDetection
 qgisMinimumVersion=3.22
-description=Satellite image change detection using MambaBCD (ChangeMamba) deep learning models with CPU/GPU support
+description=Satellite image change detection using ChangerEx deep learning models with CPU/GPU support
 version=0.1.0
 author=ChangeDetection
 email=uchange@example.com
-about=Detects changes between two georeferenced satellite images using MambaBCD from the ChangeMamba framework. Includes pretrained models for vegetation/general changes (SYSU-CD) and building changes (LEVIR-CD+). Outputs vector polygons in GeoPackage format. Supports CPU and GPU inference.
+about=Detects changes between two georeferenced satellite images using ChangerEx (R18). Includes a pretrained model for building changes (LEVIR-CD). Outputs vector polygons in GeoPackage format. Supports CPU and GPU inference.
 tracker=https://github.com/ja1902/ChangeDetection/issues
 repository=https://github.com/ja1902/ChangeDetection
-tags=change detection,remote sensing,deep learning,mamba,ssm,mambabcd
+tags=change detection,remote sensing,deep learning,changerex,opencd
 category=Raster
 icon=icon.png
 experimental=True

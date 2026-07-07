@@ -1,5 +1,5 @@
 """
-Run MambaBCD change detection on your own image pair.
+Run ChangerEx change detection on your own image pair.
 
 Usage:
     python detect_changes.py --before path/to/before.tif --after path/to/after.tif
@@ -125,10 +125,10 @@ def save_geotiff(path, array, geo_info):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="MambaBCD change detection on custom images")
+    parser = argparse.ArgumentParser(description="ChangerEx change detection on custom images")
     parser.add_argument("--before", required=True, help="Path to before image")
     parser.add_argument("--after", required=True, help="Path to after image")
-    parser.add_argument("--weights", default="MambaBCD_Small_LEVIRCD+.pth")
+    parser.add_argument("--weights", default="ChangerEx_r18-512x512_40k_levircd.pth")
     parser.add_argument("--output", default="change_result", help="Output directory")
     parser.add_argument("--threshold", type=float, default=0.5)
     parser.add_argument("--tile-size", type=int, default=256)
