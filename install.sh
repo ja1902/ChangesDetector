@@ -19,6 +19,15 @@ fi
 PY_VER=$(python3 -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')")
 echo "Found Python $PY_VER"
 
+if ! command -v gdal-config &>/dev/null; then
+    echo "ERROR: gdal-config not found. Please install the GDAL development headers:"
+    echo "  sudo apt install libgdal-dev"
+    exit 1
+fi
+
+GDAL_VERSION=$(gdal-config --version)
+echo "Found GDAL $GDAL_VERSION"
+
 # -----------------------------------------------
 # 2. Create virtual environment
 # -----------------------------------------------
@@ -30,7 +39,7 @@ else
     python3 -m venv "$VENV_DIR"
 fi
 source "$VENV_DIR/bin/activate"
-pip install --upgrade pip
+pip install --upgrade pip setuptools wheel
 
 # -----------------------------------------------
 # 3. Install PyTorch (GPU or CPU)
@@ -52,7 +61,18 @@ echo ""
 echo "Installing dependencies..."
 pip install -r "$SCRIPT_DIR/requirements.txt"
 
-# mmcv requires a CUDA-specific wheel
+# Pin GDAL Python bindings to match the system library version.
+# Build from source (--no-binary) with numpy present (--no-build-isolation)
+# so that gdal_array is compiled correctly.
+echo "Installing GDAL Python bindings (v$GDAL_VERSION)..."
+pip install --no-cache-dir --no-binary GDAL --no-build-isolation "GDAL==$GDAL_VERSION"
+
+# arosics/geoarray/py_tools_ds officially require GDAL >= 3.8, but work
+# with older versions via our compatibility shims in _gdal_compat.py.
+# Install without deps to avoid pip pulling an incompatible GDAL version.
+echo "Installing AROSICS (co-registration)..."
+pip install --no-deps arosics geoarray py_tools_ds
+
 echo "Installing mmcv..."
 if command -v nvidia-smi &>/dev/null; then
     pip install mmcv==2.2.0 -f https://download.openmmlab.com/mmcv/dist/cu121/torch2.4/index.html
@@ -66,7 +86,7 @@ fi
 echo ""
 echo "Downloading model weights..."
 
-GITHUB_RELEASE="https://github.com/ja1902/ChangesDetector/releases/download/v0.2.0"
+GITHUB_RELEASE="https://github.com/ja1902/ChangesDetector/releases/download/v0.3.0"
 
 download_weights() {
     local url="$1"

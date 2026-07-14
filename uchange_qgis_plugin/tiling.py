@@ -97,8 +97,8 @@ def _run_batch(model, pre_batch, post_batch, device):
 def run_tiled_inference(model, pre_img, post_img, tile_size, overlap, device,
                         progress_fn=None, cancel_fn=None):
     h, w = pre_img.shape[:2]
-    prob_map = np.zeros((h, w), dtype=np.float64)
-    count_map = np.zeros((h, w), dtype=np.float64)
+    prob_map = np.zeros((h, w), dtype=np.float32)
+    count_map = np.zeros((h, w), dtype=np.float32)
 
     tiles = list(generate_tiles(h, w, tile_size, overlap))
     total = len(tiles)

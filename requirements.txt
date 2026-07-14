@@ -17,3 +17,17 @@ prettytable
 rich
 ftfy
 regex
+shapely
+scikit-image>=0.21.0
+pandas
+geopandas
+cartopy
+dill
+pyproj
+spectral
+cmocean
+folium
+geojson
+joblib
+plotly
+pyshp

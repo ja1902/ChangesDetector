@@ -57,6 +57,9 @@ echo.
 echo Installing dependencies...
 pip install -r "%SCRIPT_DIR%\requirements.txt"
 
+echo Installing AROSICS (co-registration)...
+pip install arosics geoarray py_tools_ds shapely scikit-image
+
 echo Installing mmcv...
 nvidia-smi >nul 2>&1
 if %errorlevel% equ 0 (
@@ -71,7 +74,7 @@ if %errorlevel% equ 0 (
 echo.
 echo Downloading model weights...
 
-set "GITHUB_RELEASE=https://github.com/ja1902/ChangesDetector/releases/download/v0.2.0"
+set "GITHUB_RELEASE=https://github.com/ja1902/ChangesDetector/releases/download/v0.3.0"
 
 set "CHANGEREX_WEIGHTS=%SCRIPT_DIR%\ChangerEx_r18-512x512_40k_levircd.pth"
 if exist "%CHANGEREX_WEIGHTS%" (

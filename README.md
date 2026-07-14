@@ -2,6 +2,30 @@
 
 A research project exploring automated change detection between georeferenced satellite images, delivered as a QGIS plugin.
 
+## What changed (v0.3)
+
+This version adds **automatic image co-registration** using [AROSICS](https://github.com/GFZ/arosics), which corrects sub-pixel spatial misalignment between image pairs before change detection. Satellite images captured at different times often have small GPS/sensor offsets that produce false change detections along edges and boundaries. Co-registration eliminates this noise.
+
+### Co-registration
+
+- Integrated AROSICS global shift correction into both the QGIS plugin and the standalone CLI
+- Activates automatically when input images are georeferenced TIFFs with a valid CRS
+- Detects and corrects shifts up to 50px (configurable via `--max-shift`)
+- CRS compatibility pre-check with a clear error message if images need reprojection
+- Handles images with invalid nodata metadata (e.g. nodata=256 on uint8 bands) that would otherwise crash AROSICS
+
+### Tested impact
+
+On a real-world New Zealand 20cm aerial image pair (2012 vs 2016, 11265x15354px):
+
+| Scenario | Change detected |
+|----------|----------------|
+| Without co-registration | 2.70% |
+| **With co-registration** | **2.04%** |
+
+The ~0.7% difference is false positives caused by a 1.4px natural misalignment between captures. With a synthetic 10px shift applied, co-registration fully recovers the correct baseline (2.04%).
+
+
 ## What changed (v0.2)
 
 The first version of this plugin shipped with **MambaBCD** (a state-space model) and **PeftCD** (DINOv3 + LoRA), which I selected based on their published benchmark scores and my own testing. I had looked at the models in the [Open-CD](https://github.com/likyoo/open-cd) repository but dismissed them -- they were older CNN architectures with similar reported F1 scores, and I assumed the newer approaches would be faster and more practical at inference time.
@@ -115,7 +139,7 @@ For use outside QGIS:
 python detect_changes.py --before path/to/before.tif --after path/to/after.tif
 ```
 
-Options: `--threshold 0.3`, `--overlap 64`, `--tile-size 256`, `--weights path/to/weights.pth`
+Options: `--threshold 0.3`, `--overlap 64`, `--tile-size 256`, `--weights path/to/weights.pth`, `--no-coreg`, `--max-shift 50`, `--coreg-window 1024`
 
 ## Troubleshooting
 

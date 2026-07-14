@@ -51,12 +51,47 @@ class ChangeDetectionInferenceTask(QgsTask):
         post_img, _, _ = read_raster(p["after_path"])
         self.setProgress(10)
 
+        has_real_georef = projection_wkt and geotransform[1] != 1.0
+
+        if p.get("coregister", True) and has_real_georef:
+            self._log("Co-registering images...")
+            try:
+                from .coregistration import coregister_images
+                coreg_result = coregister_images(
+                    ref_path=p["before_path"],
+                    tgt_path=p["after_path"],
+                )
+                if coreg_result.success and coreg_result.corrected_path:
+                    self._log(
+                        f"Co-registration: shift X={coreg_result.shift_x_px:.2f}px, "
+                        f"Y={coreg_result.shift_y_px:.2f}px"
+                    )
+                    post_img, _, _ = read_raster(coreg_result.corrected_path)
+                    self._coreg_cleanup = coreg_result.cleanup
+                elif coreg_result.success:
+                    self._log(f"Co-registration: {coreg_result.message}")
+                else:
+                    self._log(f"Co-registration: {coreg_result.message}. Using original images.")
+            except ImportError:
+                self._log("Warning: AROSICS not installed. Skipping co-registration.")
+            except Exception as e:
+                self._log(f"Co-registration failed: {e}. Using original images.")
+        self.setProgress(15)
+
         if pre_img.shape[:2] != post_img.shape[:2]:
-            self.error_message = (
-                f"Image dimensions don't match: "
-                f"before={pre_img.shape[:2]}, after={post_img.shape[:2]}"
-            )
-            return False
+            bh, bw = pre_img.shape[:2]
+            ah, aw = post_img.shape[:2]
+            if abs(bh - ah) <= 2 and abs(bw - aw) <= 2:
+                h_min, w_min = min(bh, ah), min(bw, aw)
+                self._log(f"Trimming to common size: {w_min}x{h_min}")
+                pre_img = pre_img[:h_min, :w_min]
+                post_img = post_img[:h_min, :w_min]
+            else:
+                self.error_message = (
+                    f"Image dimensions don't match: "
+                    f"before={pre_img.shape[:2]}, after={post_img.shape[:2]}"
+                )
+                return False
 
         self._log(f"Using device: {device}")
         self._log("Building model...")
@@ -87,7 +122,7 @@ class ChangeDetectionInferenceTask(QgsTask):
             self._log("Cancelled.")
             return False
 
-        del model
+        del model, pre_img, post_img
         if device.type == "cuda":
             torch.cuda.empty_cache()
 
@@ -123,4 +158,6 @@ class ChangeDetectionInferenceTask(QgsTask):
         return True
 
     def finished(self, result):
-        pass
+        if hasattr(self, '_coreg_cleanup') and self._coreg_cleanup:
+            self._coreg_cleanup()
+            self._coreg_cleanup = None

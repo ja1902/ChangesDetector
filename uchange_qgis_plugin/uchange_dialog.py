@@ -78,6 +78,10 @@ class UChangeDialog(QDialog):
         proc_group = QGroupBox("Processing")
         proc_form = QFormLayout()
 
+        self.coregister_check = QCheckBox("Co-register images before analysis")
+        self.coregister_check.setChecked(True)
+        proc_form.addRow("", self.coregister_check)
+
         self.tile_size = QSpinBox()
         self.tile_size.setRange(128, 1024)
         self.tile_size.setSingleStep(64)
@@ -248,6 +252,9 @@ class UChangeDialog(QDialog):
             self._log(f"ERROR: {e}\n{traceback.format_exc()}")
             self.iface.messageBar().pushCritical("ChangeDetection", f"Inference failed: {e}")
         finally:
+            if hasattr(self, '_coreg_cleanup') and self._coreg_cleanup:
+                self._coreg_cleanup()
+                self._coreg_cleanup = None
             self.run_btn.setEnabled(True)
 
     def _run_inference(self, device):
@@ -279,11 +286,46 @@ class UChangeDialog(QDialog):
         post_img, _, _ = read_raster(after_layer.source())
         self._set_progress(10)
 
+        has_real_georef = projection_wkt and geotransform[1] != 1.0
+
+        if self.coregister_check.isChecked() and has_real_georef:
+            self._log("Co-registering images...")
+            try:
+                from .coregistration import coregister_images
+                coreg_result = coregister_images(
+                    ref_path=before_layer.source(),
+                    tgt_path=after_layer.source(),
+                )
+                if coreg_result.success and coreg_result.corrected_path:
+                    self._log(
+                        f"Co-registration: shift X={coreg_result.shift_x_px:.2f}px, "
+                        f"Y={coreg_result.shift_y_px:.2f}px"
+                    )
+                    post_img, _, _ = read_raster(coreg_result.corrected_path)
+                    self._coreg_cleanup = coreg_result.cleanup
+                elif coreg_result.success:
+                    self._log(f"Co-registration: {coreg_result.message}")
+                else:
+                    self._log(f"Co-registration: {coreg_result.message}. Using original images.")
+            except ImportError:
+                self._log("Warning: AROSICS not installed. Skipping co-registration.")
+            except Exception as e:
+                self._log(f"Co-registration failed: {e}. Using original images.")
+        self._set_progress(15)
+
         if pre_img.shape[:2] != post_img.shape[:2]:
-            raise ValueError(
-                f"Image dimensions don't match: "
-                f"before={pre_img.shape[:2]}, after={post_img.shape[:2]}"
-            )
+            bh, bw = pre_img.shape[:2]
+            ah, aw = post_img.shape[:2]
+            if abs(bh - ah) <= 2 and abs(bw - aw) <= 2:
+                h_min, w_min = min(bh, ah), min(bw, aw)
+                self._log(f"Trimming to common size: {w_min}x{h_min}")
+                pre_img = pre_img[:h_min, :w_min]
+                post_img = post_img[:h_min, :w_min]
+            else:
+                raise ValueError(
+                    f"Image dimensions don't match: "
+                    f"before={pre_img.shape[:2]}, after={post_img.shape[:2]}"
+                )
 
         self._log(f"Using device: {device}")
         self._log("Building model...")
@@ -308,7 +350,7 @@ class UChangeDialog(QDialog):
             progress_fn=progress_fn,
         )
 
-        del model
+        del model, pre_img, post_img
         if device.type == "cuda":
             torch.cuda.empty_cache()
 

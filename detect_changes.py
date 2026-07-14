@@ -36,6 +36,8 @@ def read_image(path):
                 for i in range(1, min(ds.RasterCount, 3) + 1):
                     bands.append(ds.GetRasterBand(i).ReadAsArray())
                 img = np.stack(bands, axis=-1).astype(np.uint8)
+                if img.shape[2] == 1:
+                    img = np.repeat(img, 3, axis=2)
                 geo_info = {
                     "geotransform": ds.GetGeoTransform(),
                     "projection": ds.GetProjection(),
@@ -55,8 +57,8 @@ def run_inference(model, before_img, after_img, tile_size, device, overlap=0):
     from uchange_qgis_plugin.model_bridge import normalize_tile
 
     h, w = before_img.shape[:2]
-    prob_map = np.zeros((h, w), dtype=np.float64)
-    count_map = np.zeros((h, w), dtype=np.float64)
+    prob_map = np.zeros((h, w), dtype=np.float32)
+    count_map = np.zeros((h, w), dtype=np.float32)
 
     step = tile_size - overlap
     tiles = []
@@ -134,6 +136,12 @@ def main():
     parser.add_argument("--tile-size", type=int, default=256)
     parser.add_argument("--overlap", type=int, default=0)
     parser.add_argument("--device", default="auto")
+    parser.add_argument("--no-coreg", action="store_true",
+                        help="Skip co-registration of input images")
+    parser.add_argument("--max-shift", type=int, default=50,
+                        help="Max co-registration shift in pixels (default: 50)")
+    parser.add_argument("--coreg-window", type=int, default=1024,
+                        help="Co-registration matching window size (default: 1024)")
     args = parser.parse_args()
 
     if args.device == "auto":
@@ -156,9 +164,41 @@ def main():
     print(f"Reading after:  {args.after}")
     after_img, after_geo = read_image(args.after)
 
+    coreg_cleanup = None
+    if not args.no_coreg and before_geo and after_geo:
+        print("Co-registering images...")
+        try:
+            from uchange_qgis_plugin.coregistration import coregister_images
+            coreg_result = coregister_images(
+                args.before, args.after,
+                max_shift=args.max_shift,
+                window_size=(args.coreg_window, args.coreg_window),
+            )
+            if coreg_result.success and coreg_result.corrected_path:
+                print(f"  Shift: X={coreg_result.shift_x_px:.2f}px, Y={coreg_result.shift_y_px:.2f}px")
+                after_img, after_geo = read_image(coreg_result.corrected_path)
+                coreg_cleanup = coreg_result.cleanup
+            elif coreg_result.success:
+                print(f"  {coreg_result.message}")
+            else:
+                msg = coreg_result.message.rstrip('.')
+                print(f"  {msg}. Using original images.")
+        except ImportError:
+            print("  AROSICS not available. Skipping co-registration.")
+        except Exception as e:
+            print(f"  Co-registration failed: {e}. Using original images.")
+
     if before_img.shape[:2] != after_img.shape[:2]:
-        print(f"ERROR: Image dimensions don't match: before={before_img.shape[:2]}, after={after_img.shape[:2]}")
-        sys.exit(1)
+        bh, bw = before_img.shape[:2]
+        ah, aw = after_img.shape[:2]
+        if abs(bh - ah) <= 2 and abs(bw - aw) <= 2:
+            h_min, w_min = min(bh, ah), min(bw, aw)
+            print(f"  Trimming to common size: {w_min}x{h_min} (was {bw}x{bh} / {aw}x{ah})")
+            before_img = before_img[:h_min, :w_min]
+            after_img = after_img[:h_min, :w_min]
+        else:
+            print(f"ERROR: Image dimensions don't match: before={before_img.shape[:2]}, after={after_img.shape[:2]}")
+            sys.exit(1)
 
     h, w = before_img.shape[:2]
     print(f"Image size: {w}x{h}")
@@ -201,6 +241,9 @@ def main():
     del model
     if device.type == "cuda":
         torch.cuda.empty_cache()
+
+    if coreg_cleanup:
+        coreg_cleanup()
 
     print(f"\nDone! Results in {args.output}/")
 
