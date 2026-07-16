@@ -74,7 +74,7 @@ if %errorlevel% equ 0 (
 echo.
 echo Downloading model weights...
 
-set "GITHUB_RELEASE=https://github.com/ja1902/ChangesDetector/releases/download/v0.3.0"
+set "GITHUB_RELEASE=https://github.com/acoding04/ChangeDetection/releases/download/V0.2.0"
 
 set "CHANGEREX_WEIGHTS=%SCRIPT_DIR%\ChangerEx_r18-512x512_40k_levircd.pth"
 if exist "%CHANGEREX_WEIGHTS%" (

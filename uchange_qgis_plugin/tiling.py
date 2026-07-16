@@ -30,16 +30,16 @@ def _extract_tile(img, y0, x0, y1, x1, tile_size):
     return tile, th, tw
 
 
-def _estimate_batch_size(device, tile_size):
+def _estimate_batch_size(device, tile_size, scd_mode=False):
     if device.type != "cuda":
         return 4
 
     import torch
-    free_mem = torch.cuda.mem_get_info(device)[0]
+    free_mem = torch.cuda.mem_get_info(device.index or 0)[0]
 
     bytes_per_tile = tile_size * tile_size * 3 * 4
-    model_overhead = 1.5 * 1024**3
-    activation_multiplier = 12
+    model_overhead = (2.5 if scd_mode else 1.5) * 1024**3
+    activation_multiplier = 16 if scd_mode else 12
 
     available = max(0, free_mem - model_overhead)
     batch = max(1, int(available / (bytes_per_tile * activation_multiplier)))
@@ -88,8 +88,15 @@ def _run_batch(model, pre_batch, post_batch, device):
     use_amp = amp_dtype is not None
 
     with torch.inference_mode(), torch.amp.autocast("cuda", enabled=use_amp, dtype=amp_dtype or torch.float32):
-        logits = model(pre, post)
-        probs = torch.softmax(logits.float(), dim=1)[:, 1].cpu().numpy()
+        output = model(pre, post)
+
+        if isinstance(output, dict):
+            binary_probs = torch.softmax(output['seg_logits'].float(), dim=1)[:, 1].cpu().numpy()
+            sem_from = output['seg_logits_from'].float().argmax(dim=1).cpu().numpy()
+            sem_to = output['seg_logits_to'].float().argmax(dim=1).cpu().numpy()
+            return {'binary_probs': binary_probs, 'semantic_from': sem_from, 'semantic_to': sem_to}
+
+        probs = torch.softmax(output.float(), dim=1)[:, 1].cpu().numpy()
 
     return probs
 
@@ -97,13 +104,20 @@ def _run_batch(model, pre_batch, post_batch, device):
 def run_tiled_inference(model, pre_img, post_img, tile_size, overlap, device,
                         progress_fn=None, cancel_fn=None):
     h, w = pre_img.shape[:2]
+    scd_mode = getattr(model, 'is_scd', False)
+
     prob_map = np.zeros((h, w), dtype=np.float32)
     count_map = np.zeros((h, w), dtype=np.float32)
+
+    if scd_mode:
+        num_classes = 6
+        votes_from = np.zeros((num_classes, h, w), dtype=np.float32)
+        votes_to = np.zeros((num_classes, h, w), dtype=np.float32)
 
     tiles = list(generate_tiles(h, w, tile_size, overlap))
     total = len(tiles)
 
-    batch_size = _estimate_batch_size(device, tile_size)
+    batch_size = _estimate_batch_size(device, tile_size, scd_mode=scd_mode)
 
     with ThreadPoolExecutor(max_workers=1) as executor:
         future = executor.submit(_prepare_batch, tiles[0:batch_size], pre_img, post_img, tile_size)
@@ -121,16 +135,36 @@ def run_tiled_inference(model, pre_img, post_img, tile_size, overlap, device,
                     pre_img, post_img, tile_size
                 )
 
-            probs = _run_batch(model, pre_batch, post_batch, device)
+            result = _run_batch(model, pre_batch, post_batch, device)
 
-            for j, (y0, x0, y1, x1, th, tw) in enumerate(tile_meta):
-                prob = probs[j, :th, :tw]
-                prob_map[y0:y1, x0:x1] += prob
-                count_map[y0:y1, x0:x1] += 1.0
+            if scd_mode:
+                for j, (y0, x0, y1, x1, th, tw) in enumerate(tile_meta):
+                    prob_map[y0:y1, x0:x1] += result['binary_probs'][j, :th, :tw]
+                    count_map[y0:y1, x0:x1] += 1.0
+                    cls_from = result['semantic_from'][j, :th, :tw]
+                    cls_to = result['semantic_to'][j, :th, :tw]
+                    for c in range(num_classes):
+                        votes_from[c, y0:y1, x0:x1] += (cls_from == c).astype(np.float32)
+                        votes_to[c, y0:y1, x0:x1] += (cls_to == c).astype(np.float32)
+            else:
+                for j, (y0, x0, y1, x1, th, tw) in enumerate(tile_meta):
+                    prob_map[y0:y1, x0:x1] += result[j, :th, :tw]
+                    count_map[y0:y1, x0:x1] += 1.0
 
             done = min(start + batch_size, total)
             if progress_fn:
                 progress_fn(done, total)
 
     count_map = np.maximum(count_map, 1.0)
-    return (prob_map / count_map).astype(np.float32)
+    prob_map = (prob_map / count_map).astype(np.float32)
+
+    if scd_mode:
+        semantic_from = votes_from.argmax(axis=0).astype(np.uint8)
+        semantic_to = votes_to.argmax(axis=0).astype(np.uint8)
+        return {
+            'prob_map': prob_map,
+            'semantic_from': semantic_from,
+            'semantic_to': semantic_to,
+        }
+
+    return prob_map

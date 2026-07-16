@@ -2,6 +2,28 @@
 
 A research project exploring automated change detection between georeferenced satellite images, delivered as a QGIS plugin.
 
+## What changed (v0.4)
+
+This version adds **Semantic Change Detection (SCD)** as a selectable mode alongside the existing binary change detection. Instead of just detecting *where* change occurred, SCD classifies *what* the changed areas became -- water, ground, low vegetation, tree, building, or sports field.
+
+### Semantic Change Detection
+
+- New "Detection mode" selector in the plugin: **Binary Change Detection** or **Semantic Change Detection**
+- SCD uses a **SiamEncoder-MultiDecoder (UPerNet + ResNet-18)** trained on the [SECOND dataset](https://captain-whu.github.io/SCD/) (6 land-cover classes)
+- Outputs two GeoTIFF layers:
+  - **Binary Change** -- change/no-change mask
+  - **Semantic Change** -- land-cover classification of changed areas, transparent over unchanged areas so the satellite image shows through
+- Colour-coded legend in QGIS with class names (water, ground, low vegetation, tree, building, sports field)
+- CLI support: `python detect_changes.py --before img1.tif --after img2.tif --mode semantic`
+- Co-registration, tiled inference, and GPU acceleration all work with SCD
+
+### Included Models
+
+| Model | Training Dataset | Architecture | Mode |
+|-------|-----------------|--------------|------|
+| ChangerEx (R18) | LEVIR-CD | ResNet-18 + FDAF | Binary CD |
+| SCD UPerNet (R18) | SECOND | UPerNet + ResNet-18 | Semantic CD |
+
 ## What changed (v0.3)
 
 This version adds **automatic image co-registration** using [AROSICS](https://github.com/GFZ/arosics), which corrects sub-pixel spatial misalignment between image pairs before change detection. Satellite images captured at different times often have small GPS/sensor offsets that produce false change detections along edges and boundaries. Co-registration eliminates this noise.
@@ -48,10 +70,6 @@ ChangerEx uses a ResNet-18 backbone. Despite being simpler and older than the mo
 
 For full benchmark results and analysis, see [BENCHMARK_REPORT.md](BENCHMARK_REPORT.md).
 
-### Semantic CD
-
-As I optimise binary CD further (custom dataset), I will be exploring semantic CD in another repo.
-
 ### Findings on generalization
 
 A central finding is that most change detection models are **domain-locked** -- they perform well on imagery similar to their training set but struggle on anything else. **The only reliable path to accurate results on a specific area is fine-tuning on labelled data from that region using the same image source.**
@@ -74,11 +92,12 @@ Integrate VLMs so that users can either specify the type of change they are look
 
 ## Phase 1: QGIS Plugin
 
-### Included Model
+### Included Models
 
-| Model | Training Dataset | Architecture | Best For |
-|-------|-----------------|--------------|----------|
-| ChangerEx (R18) | LEVIR-CD | ResNet-18 + FDAF | Building footprint changes |
+| Model | Training Dataset | Architecture | Mode |
+|-------|-----------------|--------------|------|
+| ChangerEx (R18) | LEVIR-CD | ResNet-18 + FDAF | Binary CD |
+| SCD UPerNet (R18) | SECOND | UPerNet + ResNet-18 | Semantic CD |
 
 ### Prerequisites
 
@@ -120,16 +139,18 @@ The installer will:
 3. Enable **"ChangeDetection"**
 4. Open the plugin from **Plugins > ChangeDetection**
 5. Select your **before** and **after** raster layers
-6. Select device: **Auto**, **CPU**, or **GPU**
-7. Set processing parameters (tile size, overlap, threshold)
-8. Choose an output GeoPackage path
-9. Click **Run**
+6. Choose detection mode: **Binary Change Detection** or **Semantic Change Detection**
+7. Select device: **Auto**, **CPU**, or **GPU**
+8. Set processing parameters (tile size, overlap, threshold for binary mode)
+9. Choose an output path (GeoPackage for binary, GeoTIFF for semantic)
+10. Click **Run**
 
 ### Manual Weight Download
 
 If the installer cannot download weights automatically, download them from the [GitHub Releases page](https://github.com/ja1902/ChangeDetection/releases) and place in the project root:
 
-- `ChangerEx_r18-512x512_40k_levircd.pth`
+- `ChangerEx_r18-512x512_40k_levircd.pth` (binary CD)
+- `scd_upernet_r18_10k_second.pth` (semantic CD)
 
 ### Standalone CLI
 
@@ -139,7 +160,12 @@ For use outside QGIS:
 python detect_changes.py --before path/to/before.tif --after path/to/after.tif
 ```
 
-Options: `--threshold 0.3`, `--overlap 64`, `--tile-size 256`, `--weights path/to/weights.pth`, `--no-coreg`, `--max-shift 50`, `--coreg-window 1024`
+For semantic change detection:
+```bash
+python detect_changes.py --before path/to/before.tif --after path/to/after.tif --mode semantic
+```
+
+Options: `--mode binary|semantic`, `--threshold 0.3`, `--overlap 64`, `--tile-size 256`, `--weights path/to/weights.pth`, `--no-coreg`, `--max-shift 50`, `--coreg-window 1024`
 
 ## Troubleshooting
 

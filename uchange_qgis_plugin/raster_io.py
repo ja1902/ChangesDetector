@@ -28,7 +28,13 @@ def read_raster(source_path):
         band = ds.GetRasterBand(i).ReadAsArray()
         bands.append(band)
 
-    image = np.stack(bands, axis=-1).astype(np.uint8)
+    image = np.stack(bands, axis=-1)
+    if image.dtype != np.uint8:
+        max_val = image.max()
+        if max_val > 255:
+            image = (image.astype(np.float64) / max_val * 255).astype(np.uint8)
+        else:
+            image = image.astype(np.uint8)
     geotransform = ds.GetGeoTransform()
     projection_wkt = ds.GetProjection()
 
@@ -69,6 +75,61 @@ def save_mask_png(binary_mask, output_path):
     import cv2
     cv2.imwrite(output_path, (binary_mask * 255).astype(np.uint8),
                 [cv2.IMWRITE_PNG_COMPRESSION, 1])
+
+
+def save_semantic_geotiff(class_map, geotransform, projection_wkt, output_path,
+                          class_names, class_colors):
+    """Save a semantic class map as a GeoTIFF with a GDAL color table.
+
+    Args:
+        class_map: 2D uint8 array (H, W) with class indices
+        geotransform: GDAL geotransform tuple
+        projection_wkt: WKT projection string
+        output_path: path to output .tif file
+        class_names: tuple of class name strings
+        class_colors: tuple of (R, G, B) tuples, one per class
+    """
+    h, w = class_map.shape
+
+    driver = gdal.GetDriverByName("GTiff")
+    ds = driver.Create(output_path, w, h, 1, gdal.GDT_Byte)
+    ds.SetGeoTransform(geotransform)
+    if projection_wkt:
+        ds.SetProjection(projection_wkt)
+
+    band = ds.GetRasterBand(1)
+
+    ct = gdal.ColorTable()
+    for i, color in enumerate(class_colors):
+        alpha = 0 if i == 0 else 255
+        ct.SetColorEntry(i, (*color, alpha))
+    band.SetColorTable(ct)
+    band.SetColorInterpretation(gdal.GCI_PaletteIndex)
+    band.SetNoDataValue(0)
+
+    band.WriteArray(class_map)
+    band.SetCategoryNames(list(class_names))
+    band.FlushCache()
+    ds.FlushCache()
+    ds = None
+
+
+def save_binary_geotiff(binary_mask, geotransform, projection_wkt, output_path):
+    """Save a binary change mask as a single-band GeoTIFF (255=change, 0=no-change)."""
+    h, w = binary_mask.shape
+
+    driver = gdal.GetDriverByName("GTiff")
+    ds = driver.Create(output_path, w, h, 1, gdal.GDT_Byte)
+    ds.SetGeoTransform(geotransform)
+    if projection_wkt:
+        ds.SetProjection(projection_wkt)
+
+    band = ds.GetRasterBand(1)
+    band.SetNoDataValue(0)
+    band.WriteArray(binary_mask * 255)
+    band.FlushCache()
+    ds.FlushCache()
+    ds = None
 
 
 def polygonize_mask(binary_mask, geotransform, projection_wkt, output_path,

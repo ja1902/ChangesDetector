@@ -18,6 +18,10 @@ fi
 
 PY_VER=$(python3 -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')")
 echo "Found Python $PY_VER"
+if ! python3 -c "import sys; sys.exit(0 if sys.version_info >= (3,10) else 1)" 2>/dev/null; then
+    echo "ERROR: Python 3.10+ required (found $PY_VER)"
+    exit 1
+fi
 
 if ! command -v gdal-config &>/dev/null; then
     echo "ERROR: gdal-config not found. Please install the GDAL development headers:"
@@ -86,7 +90,7 @@ fi
 echo ""
 echo "Downloading model weights..."
 
-GITHUB_RELEASE="https://github.com/ja1902/ChangesDetector/releases/download/v0.3.0"
+GITHUB_RELEASE="https://github.com/ja1902/ChangeDetection/releases/download/v0.1.0"
 
 download_weights() {
     local url="$1"
@@ -116,6 +120,11 @@ download_weights \
     "$GITHUB_RELEASE/ChangerEx_r18-512x512_40k_levircd.pth" \
     "$SCRIPT_DIR/ChangerEx_r18-512x512_40k_levircd.pth" \
     "ChangerEx R18 (LEVIR-CD)"
+
+download_weights \
+    "$GITHUB_RELEASE/scd_upernet_r18_10k_second.pth" \
+    "$SCRIPT_DIR/scd_upernet_r18_10k_second.pth" \
+    "SCD UPerNet R18 (SECOND)"
 
 # -----------------------------------------------
 # 6. Write environment config for plugin

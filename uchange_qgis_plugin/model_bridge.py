@@ -61,9 +61,26 @@ _OPENCD_ROOT = os.path.join(_PROJECT_ROOT, "open-cd-main")
 
 MODEL_REGISTRY = {
     "ChangerEx (R18) - LEVIR-CD (buildings)":  {"file": "ChangerEx_r18-512x512_40k_levircd.pth", "type": "opencd"},
+    "SCD UPerNet (R18) - SECOND (land cover)": {"file": "scd_upernet_r18_10k_second.pth", "type": "opencd_scd"},
 }
 
 DEFAULT_WEIGHTS = "ChangerEx_r18-512x512_40k_levircd.pth"
+
+SECOND_SEMANTIC_CLASSES = (
+    'unchanged', 'water', 'ground',
+    'low vegetation', 'tree', 'building',
+    'sports field',
+)
+SECOND_SEMANTIC_PALETTE = (
+    (255, 255, 255), (0, 0, 255), (128, 128, 128),
+    (0, 128, 0), (0, 255, 0), (128, 0, 0),
+    (255, 0, 0),
+)
+
+
+def is_scd_model(display_name):
+    entry = MODEL_REGISTRY.get(display_name)
+    return entry is not None and entry.get("type") == "opencd_scd"
 
 _NORM_MEAN = np.array([0.485, 0.456, 0.406], dtype=np.float32)
 _NORM_STD = np.array([0.229, 0.224, 0.225], dtype=np.float32)
@@ -77,6 +94,22 @@ class OpenCDWrapper(torch.nn.Module):
     def __init__(self, model):
         super().__init__()
         self.model = model
+
+    def forward(self, pre, post):
+        B, C, H, W = pre.shape
+        inputs = torch.cat([pre, post], dim=1)
+        batch_img_metas = [{'ori_shape': (H, W), 'img_shape': (H, W),
+                           'pad_shape': (H, W), 'padding_size': [0, 0, 0, 0]}] * B
+        return self.model.encode_decode(inputs, batch_img_metas)
+
+
+class OpenCDSCDWrapper(torch.nn.Module):
+    """Wraps an Open-CD SCD model to accept (pre, post) ImageNet-normalized RGB
+    tensors and return a dict with binary logits + semantic logits."""
+    def __init__(self, model):
+        super().__init__()
+        self.model = model
+        self.is_scd = True
 
     def forward(self, pre, post):
         B, C, H, W = pre.shape
@@ -123,6 +156,7 @@ def _patch_mmseg_version_check():
 
 
 _OPENCD_CONFIG = "configs/changer/changer_ex_r18_512x512_40k_levircd.py"
+_OPENCD_SCD_CONFIG = "configs/general_scd/scd_upernet_r18_256x512_10k_second.py"
 
 
 def _ensure_scipy_optimize():
@@ -189,7 +223,53 @@ def _build_opencd_model(checkpoint_path, device):
     return wrapped, summary
 
 
-def build_model(checkpoint_path, device=None):
+def _build_opencd_scd_model(checkpoint_path, device):
+    if _OPENCD_ROOT not in sys.path:
+        sys.path.insert(0, _OPENCD_ROOT)
+
+    from mmengine.config import Config
+    from mmengine.runner import load_checkpoint
+    from mmengine.model import revert_sync_batchnorm
+    from mmengine.registry import DefaultScope
+
+    _ensure_scipy_optimize()
+    _patch_mmseg_version_check()
+    _import_with_standard_hook(
+        'opencd.models.backbones.interaction_resnet',
+        'opencd.models.change_detectors.siamencoder_decoder',
+        'opencd.models.change_detectors.siamencoder_multidecoder',
+        'opencd.models.decode_heads.general_scd_head',
+        'opencd.models.decode_heads.multi_head',
+        'opencd.models.necks.feature_fusion',
+        'opencd.models.data_preprocessor',
+    )
+
+    cfg = Config.fromfile(os.path.join(_OPENCD_ROOT, _OPENCD_SCD_CONFIG))
+    if hasattr(cfg.model, "pretrained"):
+        cfg.model.pretrained = None
+    for attr in ("backbone", "decode_head", "auxiliary_head"):
+        sub = getattr(cfg.model, attr, None)
+        if sub is not None and hasattr(sub, "init_cfg"):
+            sub.init_cfg = None
+
+    from opencd.registry import MODELS
+    DefaultScope.get_instance('opencd', scope_name='opencd')
+    model = MODELS.build(cfg.model)
+    load_checkpoint(model, checkpoint_path, map_location="cpu", logger=None)
+    model = revert_sync_batchnorm(model)
+    model.to(device).eval()
+
+    wrapped = OpenCDSCDWrapper(model)
+    wrapped.eval()
+
+    summary = (
+        f"Model: SCD UPerNet (R18) | "
+        f"Checkpoint: {os.path.basename(checkpoint_path)}"
+    )
+    return wrapped, summary
+
+
+def build_model(checkpoint_path, device=None, model_type="opencd"):
     if device is None:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -197,7 +277,10 @@ def build_model(checkpoint_path, device=None):
     if cache_key in _model_cache:
         return _model_cache[cache_key], "Model loaded from cache"
 
-    model, summary = _build_opencd_model(checkpoint_path, device)
+    if model_type == "opencd_scd":
+        model, summary = _build_opencd_scd_model(checkpoint_path, device)
+    else:
+        model, summary = _build_opencd_model(checkpoint_path, device)
 
     _model_cache[cache_key] = model
     return model, summary
