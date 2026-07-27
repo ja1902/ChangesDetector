@@ -90,7 +90,7 @@ fi
 echo ""
 echo "Downloading model weights..."
 
-GITHUB_RELEASE="https://github.com/ja1902/ChangeDetection/releases/download/v0.1.0"
+GITHUB_RELEASE="https://github.com/ja1902/ChangeDetection/releases/download/v0.4.0"
 
 download_weights() {
     local url="$1"
