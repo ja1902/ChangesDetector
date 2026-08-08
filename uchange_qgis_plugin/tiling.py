@@ -46,7 +46,7 @@ def _estimate_batch_size(device, tile_size, scd_mode=False):
     return min(batch, 32)
 
 
-def _prepare_batch(tiles_slice, pre_img, post_img, tile_size):
+def _prepare_batch(tiles_slice, pre_img, post_img, tile_size, grayscale=False):
     from .model_bridge import normalize_tile
     pre_tiles = []
     post_tiles = []
@@ -54,8 +54,8 @@ def _prepare_batch(tiles_slice, pre_img, post_img, tile_size):
     for y0, x0, y1, x1 in tiles_slice:
         pre_t, th, tw = _extract_tile(pre_img, y0, x0, y1, x1, tile_size)
         post_t, _, _ = _extract_tile(post_img, y0, x0, y1, x1, tile_size)
-        pre_tiles.append(normalize_tile(pre_t))
-        post_tiles.append(normalize_tile(post_t))
+        pre_tiles.append(normalize_tile(pre_t, grayscale=grayscale))
+        post_tiles.append(normalize_tile(post_t, grayscale=grayscale))
         tile_meta.append((y0, x0, y1, x1, th, tw))
     pre_batch = np.stack(pre_tiles)
     post_batch = np.stack(post_tiles)
@@ -102,7 +102,7 @@ def _run_batch(model, pre_batch, post_batch, device):
 
 
 def run_tiled_inference(model, pre_img, post_img, tile_size, overlap, device,
-                        progress_fn=None, cancel_fn=None):
+                        progress_fn=None, cancel_fn=None, grayscale=False):
     h, w = pre_img.shape[:2]
     scd_mode = getattr(model, 'is_scd', False)
 
@@ -120,7 +120,7 @@ def run_tiled_inference(model, pre_img, post_img, tile_size, overlap, device,
     batch_size = _estimate_batch_size(device, tile_size, scd_mode=scd_mode)
 
     with ThreadPoolExecutor(max_workers=1) as executor:
-        future = executor.submit(_prepare_batch, tiles[0:batch_size], pre_img, post_img, tile_size)
+        future = executor.submit(_prepare_batch, tiles[0:batch_size], pre_img, post_img, tile_size, grayscale)
 
         for start in range(0, total, batch_size):
             if cancel_fn and cancel_fn():
@@ -132,7 +132,7 @@ def run_tiled_inference(model, pre_img, post_img, tile_size, overlap, device,
             if next_start < total:
                 future = executor.submit(
                     _prepare_batch, tiles[next_start:next_start + batch_size],
-                    pre_img, post_img, tile_size
+                    pre_img, post_img, tile_size, grayscale
                 )
 
             result = _run_batch(model, pre_batch, post_batch, device)

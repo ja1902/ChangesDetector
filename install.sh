@@ -11,22 +11,56 @@ echo ""
 # -----------------------------------------------
 # 1. Check prerequisites
 # -----------------------------------------------
-if ! command -v python3 &>/dev/null; then
-    echo "ERROR: python3 not found. Please install Python 3.10+."
+MISSING_PKGS=()
+
+PYTHON_CMD=""
+for candidate in python3 python3.14 python3.13 python3.12 python3.11 python3.10; do
+    if command -v "$candidate" &>/dev/null; then
+        if "$candidate" -c "import sys; sys.exit(0 if sys.version_info[:2] >= (3,10) else 1)" 2>/dev/null; then
+            PYTHON_CMD="$candidate"
+            break
+        fi
+    fi
+done
+
+if [ -z "$PYTHON_CMD" ]; then
+    echo "ERROR: Python 3.10+ not found."
+    echo ""
+    echo "Install Python 3.10 or newer and try again."
     exit 1
 fi
 
-PY_VER=$(python3 -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')")
-echo "Found Python $PY_VER"
-if ! python3 -c "import sys; sys.exit(0 if sys.version_info >= (3,10) else 1)" 2>/dev/null; then
-    echo "ERROR: Python 3.10+ required (found $PY_VER)"
-    exit 1
+PY_VER=$($PYTHON_CMD -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')")
+echo "Found Python $PY_VER ($PYTHON_CMD)"
+
+if ! $PYTHON_CMD -m venv --help &>/dev/null; then
+    MISSING_PKGS+=("python${PY_VER}-venv")
+fi
+
+if ! $PYTHON_CMD -c "import distutils" 2>/dev/null && ! $PYTHON_CMD -c "import sysconfig" 2>/dev/null; then
+    MISSING_PKGS+=("python${PY_VER}-dev")
+fi
+
+if ! command -v gcc &>/dev/null; then
+    MISSING_PKGS+=("build-essential")
 fi
 
 if ! command -v gdal-config &>/dev/null; then
-    echo "ERROR: gdal-config not found. Please install the GDAL development headers:"
-    echo "  sudo apt install libgdal-dev"
-    exit 1
+    MISSING_PKGS+=("libgdal-dev")
+fi
+
+if [ ${#MISSING_PKGS[@]} -gt 0 ]; then
+    echo ""
+    echo "Missing system packages: ${MISSING_PKGS[*]}"
+    read -rp "Install them now? (requires sudo) [y/N] " answer
+    if [[ "$answer" =~ ^[Yy]$ ]]; then
+        sudo apt update && sudo apt install -y ${MISSING_PKGS[*]}
+    else
+        echo ""
+        echo "Install them manually with:"
+        echo "  sudo apt update && sudo apt install ${MISSING_PKGS[*]}"
+        exit 1
+    fi
 fi
 
 GDAL_VERSION=$(gdal-config --version)
@@ -40,7 +74,7 @@ if [ -d "$VENV_DIR" ]; then
     echo "Virtual environment already exists at $VENV_DIR"
 else
     echo "Creating virtual environment..."
-    python3 -m venv "$VENV_DIR"
+    $PYTHON_CMD -m venv "$VENV_DIR"
 fi
 source "$VENV_DIR/bin/activate"
 pip install --upgrade pip setuptools wheel
@@ -50,12 +84,20 @@ pip install --upgrade pip setuptools wheel
 # -----------------------------------------------
 echo ""
 echo "Detecting GPU..."
+
+PY_MINOR=$($PYTHON_CMD -c "import sys; print(sys.version_info.minor)")
+
 if command -v nvidia-smi &>/dev/null; then
     echo "NVIDIA GPU detected. Installing PyTorch with CUDA support..."
-    pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
+    if [ "$PY_MINOR" -ge 13 ]; then
+        TORCH_INDEX="https://download.pytorch.org/whl/cu128"
+    else
+        TORCH_INDEX="https://download.pytorch.org/whl/cu121"
+    fi
+    pip install torch torchvision --index-url "$TORCH_INDEX"
 else
     echo "No NVIDIA GPU detected. Installing PyTorch CPU-only..."
-    pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
+    pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
 fi
 
 # -----------------------------------------------
@@ -77,20 +119,13 @@ pip install --no-cache-dir --no-binary GDAL --no-build-isolation "GDAL==$GDAL_VE
 echo "Installing AROSICS (co-registration)..."
 pip install --no-deps arosics geoarray py_tools_ds
 
-echo "Installing mmcv..."
-if command -v nvidia-smi &>/dev/null; then
-    pip install mmcv==2.2.0 -f https://download.openmmlab.com/mmcv/dist/cu121/torch2.4/index.html
-else
-    pip install mmcv==2.2.0 -f https://download.openmmlab.com/mmcv/dist/cpu/torch2.4/index.html
-fi
-
 # -----------------------------------------------
 # 5. Download model weights from GitHub Releases
 # -----------------------------------------------
 echo ""
 echo "Downloading model weights..."
 
-GITHUB_RELEASE="https://github.com/ja1902/ChangeDetection/releases/download/v0.1.0"
+GITHUB_RELEASE="https://github.com/ja1902/ChangesDetector/releases/download/v0.5.0"
 
 download_weights() {
     local url="$1"
@@ -132,8 +167,10 @@ download_weights \
 echo ""
 echo "Writing environment config..."
 VENV_SP=$(python3 -c "import site; print(site.getsitepackages()[0])")
+VENV_PY="$VENV_DIR/bin/python"
 cat > "$SCRIPT_DIR/uchange_qgis_plugin/_env_config.py" <<PYEOF
 VENV_SITE_PACKAGES = "$VENV_SP"
+VENV_PYTHON = "$VENV_PY"
 PYEOF
 echo "  Written: _env_config.py"
 

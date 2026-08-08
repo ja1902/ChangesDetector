@@ -44,10 +44,16 @@ echo Detecting GPU...
 nvidia-smi >nul 2>&1
 if %errorlevel% equ 0 (
     echo NVIDIA GPU detected. Installing PyTorch with CUDA support...
-    pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
+    for /f "tokens=*" %%m in ('python -c "import sys; print(sys.version_info.minor)"') do set PY_MINOR=%%m
+    if !PY_MINOR! GEQ 13 (
+        set "TORCH_INDEX=https://download.pytorch.org/whl/cu128"
+    ) else (
+        set "TORCH_INDEX=https://download.pytorch.org/whl/cu121"
+    )
+    pip install torch torchvision --index-url !TORCH_INDEX!
 ) else (
     echo No NVIDIA GPU detected. Installing PyTorch CPU-only...
-    pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
+    pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
 )
 
 :: -----------------------------------------------
@@ -60,21 +66,13 @@ pip install -r "%SCRIPT_DIR%\requirements.txt"
 echo Installing AROSICS (co-registration)...
 pip install arosics geoarray py_tools_ds shapely scikit-image
 
-echo Installing mmcv...
-nvidia-smi >nul 2>&1
-if %errorlevel% equ 0 (
-    pip install mmcv==2.2.0 -f https://download.openmmlab.com/mmcv/dist/cu121/torch2.4/index.html
-) else (
-    pip install mmcv==2.2.0 -f https://download.openmmlab.com/mmcv/dist/cpu/torch2.4/index.html
-)
-
 :: -----------------------------------------------
 :: 5. Download model weights from GitHub Releases
 :: -----------------------------------------------
 echo.
 echo Downloading model weights...
 
-set "GITHUB_RELEASE=https://github.com/acoding04/ChangeDetection/releases/download/V0.2.0"
+set "GITHUB_RELEASE=https://github.com/ja1902/ChangesDetector/releases/download/v0.5.0"
 
 set "CHANGEREX_WEIGHTS=%SCRIPT_DIR%\ChangerEx_r18-512x512_40k_levircd.pth"
 if exist "%CHANGEREX_WEIGHTS%" (
@@ -89,13 +87,26 @@ if exist "%CHANGEREX_WEIGHTS%" (
     )
 )
 
+set "SCD_WEIGHTS=%SCRIPT_DIR%\scd_upernet_r18_10k_second.pth"
+if exist "%SCD_WEIGHTS%" (
+    echo SCD UPerNet weights already exist, skipping download.
+) else (
+    echo Downloading SCD UPerNet R18 [SECOND]...
+    curl -L --fail --progress-bar -o "%SCD_WEIGHTS%" "%GITHUB_RELEASE%/scd_upernet_r18_10k_second.pth"
+    if !errorlevel! neq 0 (
+        del "%SCD_WEIGHTS%" 2>nul
+        echo WARNING: Download failed. Please download manually.
+        echo          Place the file at: %SCD_WEIGHTS%
+    )
+)
+
 :: -----------------------------------------------
 :: 6. Write environment config for plugin
 :: -----------------------------------------------
 echo.
 echo Writing environment config...
 set "ENV_CONFIG=%SCRIPT_DIR%\uchange_qgis_plugin\_env_config.py"
-python -c "import pathlib; pathlib.Path(r'%ENV_CONFIG%').write_text('VENV_SITE_PACKAGES = r\"%VENV_DIR%\\Lib\\site-packages\"\n')"
+python -c "import pathlib; pathlib.Path(r'%ENV_CONFIG%').write_text('VENV_SITE_PACKAGES = r\"%VENV_DIR%\\Lib\\site-packages\"\nVENV_PYTHON = r\"%VENV_DIR%\\Scripts\\python.exe\"\n')"
 echo   Written: _env_config.py
 
 :: -----------------------------------------------

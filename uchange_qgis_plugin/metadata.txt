@@ -2,10 +2,10 @@
 name=ChangeDetection
 qgisMinimumVersion=3.22
 description=Satellite image change detection using ChangerEx deep learning models with CPU/GPU support
-version=0.1.0
+version=0.5.0
 author=ChangeDetection
 email=uchange@example.com
-about=Detects changes between two georeferenced satellite images using ChangerEx (R18). Includes a pretrained model for building changes (LEVIR-CD). Outputs vector polygons in GeoPackage format. Supports CPU and GPU inference.
+about=Detects changes between two georeferenced satellite images using deep learning. Supports binary change detection (ChangerEx R18, LEVIR-CD) and semantic change detection (SCD UPerNet R18, SECOND). Includes automatic co-registration, fine-tuning support, and CPU/GPU inference. Works with Python 3.10-3.14.
 tracker=https://github.com/ja1902/ChangeDetection/issues
 repository=https://github.com/ja1902/ChangeDetection
 tags=change detection,remote sensing,deep learning,changerex,opencd

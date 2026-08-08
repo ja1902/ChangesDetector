@@ -2,6 +2,39 @@
 
 A research project exploring automated change detection between georeferenced satellite images, delivered as a QGIS plugin.
 
+## What changed (v0.5)
+
+This version makes the plugin **compatible with Python 3.10 through 3.14**, so it works out of the box on both current Ubuntu LTS releases (22.04 with Python 3.10) and the latest (26.04 with Python 3.14). It also removes the dependency on the MMlab ecosystem (mmcv, mmseg, mmengine, open-cd) for inference.
+
+### Why remove MMlab?
+
+The original architecture used OpenCD/MMlab as the model framework. This worked but created significant friction:
+
+- **mmcv compiles CUDA C++ extensions at install time**, which must exactly match your PyTorch + CUDA versions. This was the #1 source of install failures.
+- **MMlab packages lag behind Python releases** -- they typically take months to support new versions. With Python 3.14 shipping as the default in Ubuntu 26.04, users would be stuck waiting.
+- **Version conflicts** -- mmcv 2.x requires mmseg 1.x requires mmengine 0.x, and they all have to match exactly.
+- **Size** -- mmcv + mmseg + opencd added 1-2 GB on top of PyTorch.
+
+The model code (ChangerEx and SCD UPerNet) is now self-contained within the plugin -- pure PyTorch with no framework dependencies. This cuts the install to just `pip install torch` plus standard scientific Python packages.
+
+### Subprocess-based inference
+
+Previously the QGIS plugin imported PyTorch directly inside QGIS's own Python process. This broke when the venv's Python version didn't match QGIS's Python (e.g. a Python 3.14 venv on a system where QGIS uses Python 3.10 -- the compiled C extensions are incompatible).
+
+Inference now runs as a **subprocess** via `detect_changes.py`, using the venv's own Python interpreter. QGIS's Python never loads PyTorch -- it just launches the subprocess and streams JSON progress back to the UI. This means the plugin works regardless of version mismatch between QGIS's Python and the venv's Python.
+
+### Installer improvements
+
+- `install.sh` now detects Python 3.10-3.14 and automatically selects the correct PyTorch CUDA variant (cu121 for Python ≤3.12, cu128 for Python 3.13+)
+- Checks for missing system packages (`python3-venv`, `libgdal-dev`, `build-essential`) and tells the user exactly what to install
+- Version pins relaxed for numpy and scipy so pre-built wheels are available on all supported Python versions
+
+### Fine-tuning your own model
+
+You can now fine-tune ChangerEx on your own labelled dataset. Fine-tuning uses OpenCD/MMEngine in a **separate virtual environment** (Python 3.10-3.12) so it doesn't interfere with the main plugin. The resulting `.pth` checkpoint works directly in the plugin and CLI.
+
+See [FINETUNING.md](FINETUNING.md) for the full guide, including dataset preparation, training options, and how to use your fine-tuned model.
+
 ## What changed (v0.4)
 
 This version adds **Semantic Change Detection (SCD)** as a selectable mode alongside the existing binary change detection. Instead of just detecting *where* change occurred, SCD classifies *what* the changed areas became -- water, ground, low vegetation, tree, building, or sports field.
@@ -101,9 +134,10 @@ Integrate VLMs so that users can either specify the type of change they are look
 
 ### Prerequisites
 
-- **Python 3.10+**
-- **QGIS 3.22+**
+- **Python 3.10-3.14** (Ubuntu 22.04-26.04 all supported)
+- **QGIS 3.22+** (any Python version -- the plugin runs inference in a subprocess)
 - **NVIDIA GPU** (recommended, CPU also supported)
+- **System packages**: `sudo apt install python3-venv python3-dev libgdal-dev build-essential`
 
 ### Installation
 

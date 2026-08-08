@@ -14,6 +14,11 @@ from qgis.core import (
 from qgis.PyQt.QtGui import QColor
 from qgis.gui import QgsMapLayerComboBox
 
+from .model_registry import (
+    MODEL_REGISTRY, is_scd_model, resolve_weights_path,
+    SECOND_SEMANTIC_CLASSES, SECOND_SEMANTIC_PALETTE,
+)
+
 
 class UChangeDialog(QDialog):
     def __init__(self, iface, parent=None):
@@ -54,7 +59,6 @@ class UChangeDialog(QDialog):
         self.device_selector.addItems(["Auto (GPU if available)", "CPU", "GPU"])
         model_form.addRow("Device:", self.device_selector)
 
-        from .model_bridge import MODEL_REGISTRY
         self._model_registry = MODEL_REGISTRY
         self.model_selector = QComboBox()
         self._populate_model_selector()
@@ -165,7 +169,6 @@ class UChangeDialog(QDialog):
         return self.mode_selector.currentIndex() == 1
 
     def _populate_model_selector(self):
-        from .model_bridge import is_scd_model
         scd = self._is_scd_mode()
         self.model_selector.clear()
         for name in self._model_registry:
@@ -178,7 +181,6 @@ class UChangeDialog(QDialog):
         self.threshold.setVisible(not scd)
         self.min_area.setVisible(not scd)
         self.style_selector.setVisible(not scd)
-        # Find and update visibility of the labels in the form layout
         proc_form = self.threshold.parent().layout()
         if proc_form:
             for row in range(proc_form.rowCount()):
@@ -196,7 +198,6 @@ class UChangeDialog(QDialog):
     def _get_weights_path(self):
         if self.custom_weights_check.isChecked() and self.weights_path.text():
             return self.weights_path.text()
-        from .model_bridge import resolve_weights_path
         return resolve_weights_path(self.model_selector.currentText())
 
     def _browse_weights(self):
@@ -250,31 +251,67 @@ class UChangeDialog(QDialog):
             return False
         return True
 
-    def _resolve_device(self):
-        from .model_bridge import _ensure_venv_on_path
-        _ensure_venv_on_path()
-        import torch
+    def _run_coregistration_subprocess(self, ref_path, tgt_path):
+        import subprocess
+        import json
+        try:
+            from ._env_config import VENV_PYTHON
+        except ImportError:
+            return None
 
-        selection = self.device_selector.currentText()
-        if selection == "CPU":
-            return torch.device("cpu")
-        elif selection == "GPU":
-            if not torch.cuda.is_available():
-                QMessageBox.warning(self, "Error", "CUDA GPU is not available on this system.")
-                return None
-            return torch.device("cuda")
+        if not os.path.isfile(VENV_PYTHON):
+            return None
+
+        project_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        script = (
+            "import sys, json, os\n"
+            f"sys.path.insert(0, {repr(project_dir)})\n"
+            "from uchange_qgis_plugin.coregistration import coregister_images\n"
+            f"r = coregister_images({repr(ref_path)}, {repr(tgt_path)}, "
+            "max_shift=50, window_size=(1024, 1024))\n"
+            "json.dump({'success': r.success, 'corrected_path': r.corrected_path,\n"
+            "  'shift_x_px': r.shift_x_px, 'shift_y_px': r.shift_y_px,\n"
+            "  'message': r.message}, sys.stdout)\n"
+        )
+        try:
+            proc = subprocess.run(
+                [VENV_PYTHON, "-c", script],
+                capture_output=True, text=True, timeout=120,
+            )
+        except subprocess.TimeoutExpired:
+            return {"error": "Co-registration timed out (120s)"}
+
+        if proc.returncode != 0:
+            if proc.returncode < 0:
+                return {"error": "Co-registration ran out of memory (images may be too large)"}
+            stderr = proc.stderr.strip().split("\n")[-1] if proc.stderr else "unknown error"
+            return {"error": f"Co-registration failed: {stderr}"}
+
+        try:
+            result = json.loads(proc.stdout)
+        except json.JSONDecodeError:
+            return {"error": "Co-registration returned invalid output"}
+
+        if not result.get("success"):
+            return {"error": result.get("message", "Co-registration failed")}
+
+        return result
+
+    def _resolve_device_str(self):
+        device_text = self.device_selector.currentText()
+        if device_text == "GPU":
+            return "gpu"
+        elif device_text == "CPU":
+            return "cpu"
         else:
-            return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+            return "auto"
 
     def _on_run(self):
         if not self._validate():
             return
 
-        device = self._resolve_device()
-        if device is None:
-            return
-
-        if device.type == "cpu":
+        device_text = self.device_selector.currentText()
+        if device_text == "CPU":
             reply = QMessageBox.question(
                 self, "Performance Warning",
                 "CPU inference may be slow.\n"
@@ -291,101 +328,10 @@ class UChangeDialog(QDialog):
         QgsApplication.processEvents()
 
         try:
-            self._run_inference(device)
+            self._run_inference_subprocess()
         except Exception as e:
             self._log(f"ERROR: {e}\n{traceback.format_exc()}")
-            self.iface.messageBar().pushCritical("ChangeDetection", f"Inference failed: {e}")
-        finally:
-            if hasattr(self, '_coreg_cleanup') and self._coreg_cleanup:
-                self._coreg_cleanup()
-                self._coreg_cleanup = None
-            self.run_btn.setEnabled(True)
-
-    def _read_and_prepare_images(self, device):
-        """Read rasters, co-register, and prepare images. Returns (pre_img, post_img, geotransform, projection_wkt)."""
-        import numpy as np
-        from .model_bridge import _ensure_venv_on_path
-        _ensure_venv_on_path()
-        from .raster_io import read_raster
-
-        before_layer = self.before_layer.currentLayer()
-        after_layer = self.after_layer.currentLayer()
-
-        self._log("Reading before raster...")
-        pre_img, geotransform, projection_wkt = read_raster(before_layer.source())
-        if not projection_wkt:
-            projection_wkt = before_layer.crs().toWkt()
-            extent = before_layer.extent()
-            pixel_w = extent.width() / before_layer.width()
-            pixel_h = extent.height() / before_layer.height()
-            geotransform = (
-                extent.xMinimum(), pixel_w, 0.0,
-                extent.yMaximum(), 0.0, -pixel_h,
-            )
-        self._set_progress(5)
-
-        self._log("Reading after raster...")
-        post_img, _, _ = read_raster(after_layer.source())
-        self._set_progress(10)
-
-        has_real_georef = projection_wkt and geotransform[1] != 1.0
-
-        if self.coregister_check.isChecked() and has_real_georef:
-            self._log("Co-registering images...")
-            try:
-                from .coregistration import coregister_images
-                coreg_result = coregister_images(
-                    ref_path=before_layer.source(),
-                    tgt_path=after_layer.source(),
-                )
-                if coreg_result.success and coreg_result.corrected_path:
-                    self._log(
-                        f"Co-registration: shift X={coreg_result.shift_x_px:.2f}px, "
-                        f"Y={coreg_result.shift_y_px:.2f}px"
-                    )
-                    post_img, _, _ = read_raster(coreg_result.corrected_path)
-                    self._coreg_cleanup = coreg_result.cleanup
-                elif coreg_result.success:
-                    self._log(f"Co-registration: {coreg_result.message}")
-                else:
-                    self._log(f"Co-registration: {coreg_result.message}. Using original images.")
-            except ImportError:
-                self._log("Warning: AROSICS not installed. Skipping co-registration.")
-            except Exception as e:
-                self._log(f"Co-registration failed: {e}. Using original images.")
-        self._set_progress(15)
-
-        if pre_img.shape[:2] != post_img.shape[:2]:
-            bh, bw = pre_img.shape[:2]
-            ah, aw = post_img.shape[:2]
-            if abs(bh - ah) <= 2 and abs(bw - aw) <= 2:
-                h_min, w_min = min(bh, ah), min(bw, aw)
-                self._log(f"Trimming to common size: {w_min}x{h_min}")
-                pre_img = pre_img[:h_min, :w_min]
-                post_img = post_img[:h_min, :w_min]
-            else:
-                raise ValueError(
-                    f"Image dimensions don't match: "
-                    f"before={pre_img.shape[:2]}, after={post_img.shape[:2]}"
-                )
-
-        return pre_img, post_img, geotransform, projection_wkt
-
-    def _run_inference(self, device):
-        import numpy as np
-        from .model_bridge import _ensure_venv_on_path
-        _ensure_venv_on_path()
-        import torch
-
-        try:
-            if self._is_scd_mode():
-                self._run_scd_inference(device)
-            else:
-                self._run_binary_inference(device)
-        except RuntimeError as e:
             if "out of memory" in str(e).lower():
-                self._log("ERROR: GPU ran out of memory.")
-                self._log("Try reducing tile size or switching to CPU.")
                 QMessageBox.critical(
                     self, "GPU Out of Memory",
                     "The GPU ran out of memory during inference.\n\n"
@@ -393,197 +339,210 @@ class UChangeDialog(QDialog):
                     "- Reducing the tile size (e.g. 128)\n"
                     "- Selecting CPU as the device",
                 )
-                return
-            raise
-
-    def _run_binary_inference(self, device):
-        import numpy as np
-        import torch
-        from .model_bridge import build_model
-        from .raster_io import polygonize_mask
-        from .tiling import run_tiled_inference
-
-        pre_img, post_img, geotransform, projection_wkt = self._read_and_prepare_images(device)
-
-        self._log(f"Using device: {device}")
-        self._log("Building model...")
-        model, load_summary = build_model(self._get_weights_path(), device)
-        self._log(load_summary)
-        self._set_progress(20)
-
-        h, w = pre_img.shape[:2]
-        tile_size = self.tile_size.value()
-        overlap = self.overlap.value()
-        self._log(f"Running tiled inference ({w}x{h}, tile={tile_size}, overlap={overlap})...")
-
-        def progress_fn(current, total):
-            pct = 20 + int(60 * current / total)
-            self._set_progress(pct)
-
-        prob_map = run_tiled_inference(
-            model, pre_img, post_img,
-            tile_size=tile_size,
-            overlap=overlap,
-            device=device,
-            progress_fn=progress_fn,
-        )
-
-        del model, pre_img, post_img
-        if device.type == "cuda":
-            torch.cuda.empty_cache()
-
-        change_pixels = int((prob_map > 0.5).sum())
-        total_pixels = prob_map.size
-        self._log(
-            f"Prob map stats: min={prob_map.min():.4f}, max={prob_map.max():.4f}, "
-            f"mean={prob_map.mean():.4f}"
-        )
-        self._log(f"Pixels > 0.5: {change_pixels}/{total_pixels} ({change_pixels/total_pixels:.2%})")
-
-        threshold = self.threshold.value()
-        binary_mask = (prob_map > threshold).astype(np.uint8)
-
-        n_change = int(binary_mask.sum())
-        self._log(f"Binary mask at threshold {threshold}: {n_change} change pixels")
-        self._set_progress(85)
-
-        output_path = self.output_path.text()
-        self._log(f"Polygonizing to {output_path}...")
-        min_area = self.min_area.value()
-        pixel_w = abs(geotransform[1])
-        pixel_h = abs(geotransform[5])
-        min_area_map = min_area * pixel_w * pixel_h
-
-        style_map = {"Exact": "exact", "Simplified": "simplified", "Convex hull": "convex hull"}
-        style = style_map[self.style_selector.currentText()]
-
-        total_polys, final_polys = polygonize_mask(
-            binary_mask, geotransform, projection_wkt,
-            output_path, min_area=min_area_map, style=style,
-        )
-        self._log(f"Polygons: {total_polys} created, {final_polys} after min-area filter")
-        self._set_progress(100)
-        self._log("Done!")
-
-        if self.add_to_project.isChecked():
-            layer = QgsVectorLayer(output_path, "Change Detection", "ogr")
-            if layer.isValid():
-                symbol = QgsSymbol.defaultSymbol(layer.geometryType())
-                fill = QgsSimpleFillSymbolLayer()
-                fill.setColor(QColor(0, 0, 0, 0))
-                fill.setStrokeColor(QColor(255, 255, 0))
-                fill.setStrokeWidth(0.5)
-                symbol.changeSymbolLayer(0, fill)
-                layer.setRenderer(QgsSingleSymbolRenderer(symbol))
-                QgsProject.instance().addMapLayer(layer)
-                self._log("Layer added to project.")
             else:
-                self._log("Warning: could not load output layer.")
+                self.iface.messageBar().pushCritical("ChangeDetection", f"Inference failed: {e}")
+        finally:
+            self.run_btn.setEnabled(True)
 
-        self.iface.messageBar().pushSuccess("ChangeDetection", "Change detection complete!")
+    def _run_inference_subprocess(self):
+        import subprocess
+        import json
+        import tempfile
 
-    def _run_scd_inference(self, device):
-        import numpy as np
-        import torch
-        from .model_bridge import (
-            build_model, is_scd_model,
-            SECOND_SEMANTIC_CLASSES, SECOND_SEMANTIC_PALETTE,
-        )
-        from .raster_io import (
-            save_semantic_geotiff, save_binary_geotiff,
-        )
-        from .tiling import run_tiled_inference
+        try:
+            from ._env_config import VENV_PYTHON
+        except ImportError:
+            raise RuntimeError("Plugin not installed correctly: _env_config.py missing. Re-run install.sh.")
+
+        if not os.path.isfile(VENV_PYTHON):
+            raise RuntimeError(f"Venv Python not found: {VENV_PYTHON}\nRe-run install.sh.")
+
+        project_dir = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+        script_path = os.path.join(project_dir, "detect_changes.py")
+        if not os.path.isfile(script_path):
+            raise RuntimeError(f"detect_changes.py not found: {script_path}")
+
+        before_path = self.before_layer.currentLayer().source()
+        after_path = self.after_layer.currentLayer().source()
+        output_path = self.output_path.text()
+        weights = self._get_weights_path()
+        device = self._resolve_device_str()
+        scd_mode = self._is_scd_mode()
+
+        output_dir = tempfile.mkdtemp(prefix="uchange_")
+
+        cmd = [
+            VENV_PYTHON, script_path,
+            "--before", before_path,
+            "--after", after_path,
+            "--output", output_dir,
+            "--weights", weights,
+            "--device", device,
+            "--tile-size", str(self.tile_size.value()),
+            "--overlap", str(self.overlap.value()),
+            "--json-progress",
+        ]
+
+        if scd_mode:
+            cmd.extend(["--mode", "semantic"])
+        else:
+            cmd.extend(["--threshold", str(self.threshold.value())])
+            if output_path.endswith(".gpkg"):
+                cmd.extend(["--output-gpkg", output_path])
+                cmd.extend(["--min-area", str(self.min_area.value())])
+                style_map = {"Exact": "exact", "Simplified": "simplified", "Convex hull": "convex"}
+                cmd.extend(["--style", style_map[self.style_selector.currentText()]])
+
+        if not self.coregister_check.isChecked():
+            cmd.append("--no-coreg")
 
         model_name = self.model_selector.currentText()
-        model_type = self._model_registry[model_name]["type"]
+        if self._model_registry.get(model_name, {}).get("grayscale", False):
+            cmd.append("--grayscale")
 
-        pre_img, post_img, geotransform, projection_wkt = self._read_and_prepare_images(device)
-
-        self._log(f"Using device: {device}")
-        self._log("Building SCD model...")
-        model, load_summary = build_model(
-            self._get_weights_path(), device, model_type=model_type)
-        self._log(load_summary)
-        self._set_progress(20)
-
-        h, w = pre_img.shape[:2]
-        tile_size = self.tile_size.value()
-        overlap = self.overlap.value()
-        self._log(f"Running SCD tiled inference ({w}x{h}, tile={tile_size}, overlap={overlap})...")
-
-        def progress_fn(current, total):
-            pct = 20 + int(60 * current / total)
-            self._set_progress(pct)
-
-        result = run_tiled_inference(
-            model, pre_img, post_img,
-            tile_size=tile_size,
-            overlap=overlap,
-            device=device,
-            progress_fn=progress_fn,
+        self._log("Starting inference subprocess...")
+        proc = subprocess.Popen(
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, bufsize=1,
         )
 
-        del model, pre_img, post_img
-        if device.type == "cuda":
-            torch.cuda.empty_cache()
+        result_info = None
+        error_msg = None
 
-        prob_map = result['prob_map']
-        semantic_to = result['semantic_to']
+        for line in proc.stdout:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                msg = json.loads(line)
+            except json.JSONDecodeError:
+                self._log(line)
+                continue
 
-        binary_mask = (prob_map > 0.5).astype(np.uint8)
-        n_change = int(binary_mask.sum())
-        total_pixels = binary_mask.size
-        self._log(f"Change pixels: {n_change}/{total_pixels} ({n_change/total_pixels:.2%})")
+            msg_type = msg.get("type")
+            if msg_type == "progress":
+                self._set_progress(msg.get("percent", 0))
+            elif msg_type == "log":
+                self._log(msg.get("message", ""))
+            elif msg_type == "device":
+                self._log(f"Device: {msg.get('device', '?')}")
+                if device == "gpu" and msg.get("device") != "cuda":
+                    proc.terminate()
+                    raise RuntimeError(
+                        "CUDA GPU is not available on this system.\n"
+                        "Select 'Auto' or 'CPU' instead.")
+            elif msg_type == "error":
+                error_msg = msg.get("message", "Unknown error")
+            elif msg_type == "result":
+                result_info = msg
 
-        # cover_semantic: shift class indices +1, mask by binary change
-        num_classes = len(SECOND_SEMANTIC_CLASSES)
-        sem_to_masked = (semantic_to.astype(np.int16) + 1) * binary_mask
-        sem_to_masked = np.clip(sem_to_masked, 0, num_classes - 1).astype(np.uint8)
+        proc.wait()
 
-        self._set_progress(85)
+        if proc.returncode != 0:
+            stderr = proc.stderr.read().strip()
+            if error_msg:
+                raise RuntimeError(error_msg)
+            stderr_last = stderr.split("\n")[-1] if stderr else "unknown error"
+            raise RuntimeError(f"Inference failed: {stderr_last}")
 
-        base_path = self.output_path.text()
-        output_dir = os.path.dirname(base_path)
-        if output_dir:
-            os.makedirs(output_dir, exist_ok=True)
-        stem = os.path.splitext(base_path)[0]
+        if error_msg:
+            raise RuntimeError(error_msg)
 
-        mask_path = f"{stem}_binary_change.tif"
-        to_path = f"{stem}_semantic_change.tif"
+        if result_info is None:
+            raise RuntimeError("Inference produced no result")
 
-        save_binary_geotiff(binary_mask, geotransform, projection_wkt, mask_path)
-        self._log(f"Saved: {mask_path}")
+        self._set_progress(90)
 
-        save_semantic_geotiff(
-            sem_to_masked, geotransform, projection_wkt, to_path,
-            SECOND_SEMANTIC_CLASSES, SECOND_SEMANTIC_PALETTE)
-        self._log(f"Saved: {to_path}")
+        if scd_mode:
+            self._handle_scd_result(result_info, output_dir)
+        else:
+            self._handle_binary_result(result_info, output_path, output_dir)
+
+        import shutil
+        shutil.rmtree(output_dir, ignore_errors=True)
 
         self._set_progress(100)
+        mode_label = "Semantic change" if scd_mode else "Change"
         self._log("Done!")
+        self.iface.messageBar().pushSuccess("ChangeDetection", f"{mode_label} detection complete!")
+
+    def _handle_binary_result(self, result_info, output_path, output_dir):
+        import shutil
+
+        result_output = result_info.get("output_path", "")
+        added_layer = False
+
+        if output_path.endswith(".gpkg") and os.path.isfile(output_path):
+            total_polys = result_info.get("total_polys", 0)
+            final_polys = result_info.get("final_polys", 0)
+            self._log(f"Polygons: {total_polys} created, {final_polys} after filter")
+
+            if self.add_to_project.isChecked():
+                layer = QgsVectorLayer(output_path, "Change Detection", "ogr")
+                if layer.isValid():
+                    symbol = QgsSymbol.defaultSymbol(layer.geometryType())
+                    fill = QgsSimpleFillSymbolLayer()
+                    fill.setColor(QColor(0, 0, 0, 0))
+                    fill.setStrokeColor(QColor(255, 255, 0))
+                    fill.setStrokeWidth(0.5)
+                    symbol.changeSymbolLayer(0, fill)
+                    layer.setRenderer(QgsSingleSymbolRenderer(symbol))
+                    QgsProject.instance().addMapLayer(layer)
+                    self._log("Layer added to project.")
+                    added_layer = True
+
+        if not added_layer and result_output and os.path.isfile(result_output):
+            dest = output_path
+            if dest.endswith(".gpkg"):
+                dest = os.path.splitext(dest)[0] + os.path.splitext(result_output)[1]
+            shutil.copy2(result_output, dest)
+            self._log(f"Saved: {dest}")
+
+            if self.add_to_project.isChecked():
+                from qgis.core import QgsRasterLayer
+                layer = QgsRasterLayer(dest, "Change Detection")
+                if layer.isValid():
+                    QgsProject.instance().addMapLayer(layer)
+                    self._log("Layer added to project.")
+
+    def _handle_scd_result(self, result_info, output_dir):
+        output_base = self.output_path.text()
+        dest_dir = os.path.dirname(output_base) or "."
+        os.makedirs(dest_dir, exist_ok=True)
+
+        import shutil
+
+        binary_path = os.path.join(output_dir, "binary_change.tif")
+        semantic_path = os.path.join(output_dir, "semantic_change.tif")
+        dest_binary = os.path.join(dest_dir, "binary_change.tif")
+        dest_semantic = os.path.join(dest_dir, "semantic_change.tif")
+
+        if os.path.isfile(binary_path):
+            shutil.copy2(binary_path, dest_binary)
+            self._log(f"Saved: {dest_binary}")
+        if os.path.isfile(semantic_path):
+            shutil.copy2(semantic_path, dest_semantic)
+            self._log(f"Saved: {dest_semantic}")
 
         if self.add_to_project.isChecked():
             from qgis.core import QgsRasterLayer, QgsPalettedRasterRenderer
 
-            mask_layer = QgsRasterLayer(mask_path, "Binary Change")
-            if mask_layer.isValid():
-                QgsProject.instance().addMapLayer(mask_layer)
-                self._log("Layer 'Binary Change' added to project.")
+            if os.path.isfile(dest_binary):
+                mask_layer = QgsRasterLayer(dest_binary, "Binary Change")
+                if mask_layer.isValid():
+                    QgsProject.instance().addMapLayer(mask_layer)
+                    self._log("Layer 'Binary Change' added.")
 
-            sem_layer = QgsRasterLayer(to_path, "Semantic Change")
-            if sem_layer.isValid():
-                classes = []
-                for i in range(1, len(SECOND_SEMANTIC_CLASSES)):
-                    r, g, b = SECOND_SEMANTIC_PALETTE[i]
-                    classes.append(QgsPalettedRasterRenderer.Class(
-                        i, QColor(r, g, b), SECOND_SEMANTIC_CLASSES[i]))
-                renderer = QgsPalettedRasterRenderer(
-                    sem_layer.dataProvider(), 1, classes)
-                sem_layer.setRenderer(renderer)
-                QgsProject.instance().addMapLayer(sem_layer)
-                self._log("Layer 'Semantic Change' added to project.")
-            else:
-                self._log("Warning: could not load 'Semantic Change' layer.")
-
-        self.iface.messageBar().pushSuccess(
-            "ChangeDetection", "Semantic change detection complete!")
+            if os.path.isfile(dest_semantic):
+                sem_layer = QgsRasterLayer(dest_semantic, "Semantic Change")
+                if sem_layer.isValid():
+                    classes = []
+                    for i in range(1, len(SECOND_SEMANTIC_CLASSES)):
+                        r, g, b = SECOND_SEMANTIC_PALETTE[i]
+                        classes.append(QgsPalettedRasterRenderer.Class(
+                            i, QColor(r, g, b), SECOND_SEMANTIC_CLASSES[i]))
+                    renderer = QgsPalettedRasterRenderer(
+                        sem_layer.dataProvider(), 1, classes)
+                    sem_layer.setRenderer(renderer)
+                    QgsProject.instance().addMapLayer(sem_layer)
+                    self._log("Layer 'Semantic Change' added.")
