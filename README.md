@@ -1,4 +1,4 @@
-# ChangeDetection - Satellite Image Change Detection
+# Changes Detector
 
 A research project exploring automated change detection between georeferenced satellite images, delivered as a QGIS plugin.
 
