@@ -116,6 +116,8 @@ class ChangeDetectionInferenceTask(QgsTask):
             device=device,
             progress_fn=progress_fn,
             cancel_fn=self.isCanceled,
+            grayscale=p.get("grayscale", False),
+            hist_match=p.get("histogram_match", False),
         )
 
         if prob_map is None:
@@ -135,6 +137,10 @@ class ChangeDetectionInferenceTask(QgsTask):
         self._log(f"Pixels > 0.5: {change_pixels}/{total_pixels} ({change_pixels/total_pixels:.2%})")
 
         threshold = p.get("threshold", 0.5)
+        if threshold == "auto":
+            from .tiling import auto_threshold
+            threshold = auto_threshold(prob_map)
+            self._log(f"Auto threshold: {threshold:.6f}")
         binary_mask = (prob_map > threshold).astype(np.uint8)
 
         n_change = int(binary_mask.sum())

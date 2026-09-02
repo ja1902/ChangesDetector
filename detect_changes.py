@@ -115,13 +115,15 @@ def main():
     parser.add_argument("--mode", choices=["binary", "semantic"], default="binary",
                         help="Detection mode: binary (default) or semantic")
     parser.add_argument("--output", default="change_result", help="Output directory")
-    parser.add_argument("--threshold", type=float, default=0.5,
-                        help="Change threshold 0.0-1.0 (default: 0.5)")
+    parser.add_argument("--threshold", default="0.5",
+                        help="Change threshold: 'auto' or 0.0-1.0 (default: 0.5)")
     parser.add_argument("--tile-size", type=int, default=256)
     parser.add_argument("--overlap", type=int, default=0)
     parser.add_argument("--device", default="auto")
     parser.add_argument("--grayscale", action="store_true",
                         help="Convert inputs to grayscale (for grayscale-trained models)")
+    parser.add_argument("--histogram-match", action="store_true",
+                        help="Match after image histogram to before image (fixes radiometric mismatch)")
     parser.add_argument("--no-coreg", action="store_true",
                         help="Skip co-registration of input images")
     parser.add_argument("--max-shift", type=int, default=50,
@@ -137,13 +139,21 @@ def main():
     parser.add_argument("--style", choices=["exact", "simplified", "convex"],
                         default="exact",
                         help="Polygon simplification style (used with --output-gpkg)")
+    parser.add_argument("--model-type", default=None,
+                        help="Model type: opencd, opencd_scd, or dinov2")
     args = parser.parse_args()
 
     _json_progress = args.json_progress
 
-    if not 0.0 <= args.threshold <= 1.0:
-        _log(f"WARNING: threshold {args.threshold} outside [0, 1], clamping")
-        args.threshold = max(0.0, min(1.0, args.threshold))
+    if args.threshold == "auto":
+        args.auto_threshold = True
+        args.threshold = 0.5  # placeholder, will be computed after inference
+    else:
+        args.auto_threshold = False
+        args.threshold = float(args.threshold)
+        if not 0.0 <= args.threshold <= 1.0:
+            _log(f"WARNING: threshold {args.threshold} outside [0, 1], clamping")
+            args.threshold = max(0.0, min(1.0, args.threshold))
 
     for path, label in [(args.before, "Before image"), (args.after, "After image")]:
         if not os.path.isfile(path):
@@ -176,7 +186,21 @@ def main():
     if not os.path.isfile(weights_path):
         _emit({"type": "error", "message": f"Model weights not found: {weights_path}"})
         sys.exit(1)
-    model_type = "opencd_scd" if args.mode == "semantic" else "opencd"
+    if args.model_type:
+        model_type = args.model_type
+    elif args.mode == "semantic":
+        model_type = "opencd_scd"
+    else:
+        model_type = "opencd"
+
+    if model_type == "dinov2":
+        patch_size = 14
+        adjusted = (args.tile_size // patch_size) * patch_size
+        if adjusted < patch_size:
+            adjusted = patch_size
+        if adjusted != args.tile_size:
+            _log(f"DINOv2: tile_size {args.tile_size} → {adjusted} (must be multiple of {patch_size})")
+            args.tile_size = adjusted
 
     _log("Building model...")
     model, load_summary = build_model(weights_path, device, model_type=model_type)
@@ -229,7 +253,8 @@ def main():
 
     h, w = before_img.shape[:2]
     _log(f"Image size: {w}x{h}")
-    _log(f"Tile size: {args.tile_size}, overlap: {args.overlap}, threshold: {args.threshold}")
+    thresh_str = "auto" if args.auto_threshold else f"{args.threshold}"
+    _log(f"Tile size: {args.tile_size}, overlap: {args.overlap}, threshold: {thresh_str}")
 
     os.makedirs(args.output, exist_ok=True)
 
@@ -242,6 +267,9 @@ def main():
         pct = 20 + int(60 * current / total)
         _progress(pct)
 
+    if args.histogram_match:
+        _log("Histogram matching: per-tile (after → before)")
+
     try:
         result = run_tiled_inference(
             model, before_img, after_img,
@@ -250,6 +278,7 @@ def main():
             device=device,
             grayscale=args.grayscale,
             progress_fn=progress_fn,
+            hist_match=args.histogram_match,
         )
     except RuntimeError as e:
         if "out of memory" in str(e).lower():
@@ -264,6 +293,14 @@ def main():
         torch.cuda.empty_cache()
 
     geo_info = before_geo or after_geo
+    if not geo_info:
+        h, w = before_img.shape[:2]
+        geo_info = {
+            "geotransform": (0.0, 1.0, 0.0, 0.0, 0.0, -1.0),
+            "projection": "",
+            "width": w,
+            "height": h,
+        }
     _progress(85)
 
     if args.mode == "semantic":
@@ -317,6 +354,11 @@ def main():
         prob_map = result
         _log(f"Prob map: min={prob_map.min():.4f}, max={prob_map.max():.4f}, mean={prob_map.mean():.4f}")
 
+        if args.auto_threshold:
+            from uchange_qgis_plugin.tiling import auto_threshold
+            args.threshold = auto_threshold(prob_map)
+            _log(f"Auto threshold: {args.threshold:.6f}")
+
         binary_mask = (prob_map > args.threshold).astype(np.uint8)
         n_change = int(binary_mask.sum())
         total = binary_mask.size
@@ -326,6 +368,7 @@ def main():
             "type": "result",
             "mode": "binary",
             "stats": {"change_pixels": n_change, "total_pixels": total},
+            "threshold": args.threshold,
         }
 
         if args.output_gpkg and geo_info:

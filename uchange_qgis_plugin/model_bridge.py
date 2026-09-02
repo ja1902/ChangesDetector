@@ -13,10 +13,11 @@ from .model_registry import (
 
 
 def _ensure_venv_on_path():
+    pyver = f"python{sys.version_info.major}.{sys.version_info.minor}"
     try:
         from . import _env_config
         sp = _env_config.VENV_SITE_PACKAGES
-        if sp and sp not in sys.path:
+        if sp and sp not in sys.path and pyver in sp:
             sys.path.insert(0, sp)
         return
     except ImportError:
@@ -27,7 +28,7 @@ def _ensure_venv_on_path():
     )
     venv_patterns = [
         os.path.join(project_root, "venv", "Lib", "site-packages"),
-        os.path.join(project_root, "venv", "lib", "python*", "site-packages"),
+        os.path.join(project_root, "venv", "lib", pyver, "site-packages"),
     ]
     venv_paths = []
     for pat in venv_patterns:
@@ -84,10 +85,12 @@ def build_model(checkpoint_path, device=None, model_type="opencd"):
     if cache_key in _model_cache:
         return _model_cache[cache_key], "Model loaded from cache"
 
-    from .models import build_changer_model, build_scd_model
+    from .models import build_changer_model, build_scd_model, build_dinov2_model
 
     if model_type == "opencd_scd":
         model, summary = build_scd_model(checkpoint_path, device)
+    elif model_type == "dinov2":
+        model, summary = build_dinov2_model(checkpoint_path, device)
     else:
         model, summary = build_changer_model(checkpoint_path, device)
 

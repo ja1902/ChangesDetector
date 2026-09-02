@@ -72,7 +72,33 @@ pip install arosics geoarray py_tools_ds shapely scikit-image
 echo.
 echo Downloading model weights...
 
-set "GITHUB_RELEASE=https://github.com/ja1902/ChangesDetector/releases/download/v0.5.0"
+set "GITHUB_RELEASE=https://github.com/ja1902/ChangesDetector/releases/download/v0.6.0"
+
+set "LEVIR_WEIGHTS=%SCRIPT_DIR%\dinov2_vitb14_levir.pth"
+if exist "%LEVIR_WEIGHTS%" (
+    echo DINOv2 generalizable weights already exist, skipping download.
+) else (
+    echo Downloading DINOv2 ViT-B/14 [generalizable]...
+    curl -L --fail --progress-bar -o "%LEVIR_WEIGHTS%" "%GITHUB_RELEASE%/dinov2_vitb14_levir.pth"
+    if !errorlevel! neq 0 (
+        del "%LEVIR_WEIGHTS%" 2>nul
+        echo WARNING: Download failed. Please download manually.
+        echo          Place the file at: %LEVIR_WEIGHTS%
+    )
+)
+
+set "DINOV2_WEIGHTS=%SCRIPT_DIR%\dinov2_vitb14_egybcd.pth"
+if exist "%DINOV2_WEIGHTS%" (
+    echo DINOv2 fine-tuned weights already exist, skipping download.
+) else (
+    echo Downloading DINOv2 ViT-B/14 [fine-tuned]...
+    curl -L --fail --progress-bar -o "%DINOV2_WEIGHTS%" "%GITHUB_RELEASE%/dinov2_vitb14_egybcd.pth"
+    if !errorlevel! neq 0 (
+        del "%DINOV2_WEIGHTS%" 2>nul
+        echo WARNING: Download failed. Please download manually.
+        echo          Place the file at: %DINOV2_WEIGHTS%
+    )
+)
 
 set "CHANGEREX_WEIGHTS=%SCRIPT_DIR%\ChangerEx_r18-512x512_40k_levircd.pth"
 if exist "%CHANGEREX_WEIGHTS%" (

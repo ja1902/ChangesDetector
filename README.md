@@ -1,6 +1,61 @@
-# ChangeDetection - Satellite Image Change Detection
+# Changes Detector
 
 A research project exploring automated change detection between georeferenced satellite images, delivered as a QGIS plugin.
+
+## What changed (v0.6)
+
+CNN-based models like ChangerEx are **domain-locked** -- they achieve high F1 on in-domain data but fail on imagery from different regions or sensors. This version tackles that problem with a **DINOv2 vision transformer** for **generalizable change detection**. After 21 experiments (see [EXPERIMENTS.md](EXPERIMENTS.md)), the key finding is a fundamental trade-off between in-domain accuracy and cross-domain generalization: techniques that improve performance on the training domain consistently hurt generalization to unseen domains. Frozen DINOv2 features with a simple FPN decoder emerged as the best balance -- sacrificing a few points of in-domain F1 for reliable cross-domain performance.
+
+### DINOv2 ViT-B/14
+
+- **Frozen DINOv2 backbone + 4-layer FPN decoder**, trained on LEVIR-CD
+- Two variants: **generalizable** (LEVIR-CD only) and **fine-tuned** (further tuned on another dataset). Fine-tuning improves accuracy on the target domain but hurts cross-domain generalization -- the same trade-off that applies at every level. The generalizable model is recommended for use on new/unseen regions. Try both to see which one performs better.
+- Standalone ViT implementation -- runs in the QGIS plugin without heavy ML framework installs
+- **Resolution-dynamic**: accepts any tile size (auto-crops to nearest multiple of 14). Default 256 becomes 252, giving ~4x fewer pixels per tile vs the fixed 518 that ViT-B/14 was trained on, with no accuracy loss
+- DINOv2 is now the **default model** in both the QGIS plugin and CLI
+
+### Auto-thresholding
+
+- **Automatic threshold selection** enabled by default -- no manual tuning needed
+- Models the unchanged distribution in log-probability space using a HWHM background model, sets threshold at 4.5 sigma above the unchanged peak
+- Recovers 98-100% of oracle IoU across different change prevalences and cross-domain shifts
+- Available via "Auto (recommended)" checkbox in QGIS and `--threshold auto` on the CLI
+
+### Histogram matching
+
+- Optional **per-tile histogram matching** to handle radiometric mismatch between image dates
+- Normalizes each tile of the "after" image to match the "before" image's color distribution
+- Helps when images have different brightness, contrast, or color balance due to different capture conditions
+- Available via "Match image histograms" checkbox in QGIS and `--histogram-match` on the CLI
+
+### Plugin UX improvements
+
+- **Threshold slider** (0.00-1.00) replaces the old spin box, with auto mode as default
+- **Default overlap** set to 32px for smoother tile boundaries
+- **Small hole removal** in output polygons -- interior holes smaller than the min-area filter are cleaned up automatically
+
+### DINOv2 training script
+
+- `train_dinov2_cd.py` -- standalone DINOv2 training pipeline, no OpenCD/mmengine dependency
+- Supports ViT-S/14, ViT-B/14, and ViT-L/14 backbones
+- Trains only the decoder (~9M params) with the backbone frozen -- requires ~4GB VRAM
+- Alternative to the OpenCD-based `finetune.py` -- no mmcv/mmengine dependency needed
+
+
+### Key findings from 21 experiments
+
+1. **Frozen DINOv2 + simple FPN + CE loss is optimal.** Everything that improves in-domain (Dice/Focal loss, backbone unfreezing, heavy augmentation, BAN decoder) hurts cross-domain generalization.
+2. **Satellite-pretrained backbones generalize worse**, not better. DINOv3 SAT, CrossEarth, DOFA, and AnySat all underperformed plain DINOv2.
+
+
+### Included Models
+
+| Model | Training Dataset | Architecture | Mode |
+|-------|-----------------|--------------|------|
+| **DINOv2 ViT-B/14 (generalizable)** | LEVIR-CD | Frozen ViT-B/14 + FPN decoder | Binary CD |
+| DINOv2 ViT-B/14 (fine-tuned) | LEVIR-CD + domain data | Frozen ViT-B/14 + FPN decoder | Binary CD |
+| ChangerEx (R18) | LEVIR-CD | ResNet-18 + FDAF | Binary CD |
+| SCD UPerNet (R18) | SECOND | UPerNet + ResNet-18 | Semantic CD |
 
 ## What changed (v0.5)
 
@@ -29,12 +84,6 @@ Inference now runs as a **subprocess** via `detect_changes.py`, using the venv's
 - Checks for missing system packages (`python3-venv`, `libgdal-dev`, `build-essential`) and tells the user exactly what to install
 - Version pins relaxed for numpy and scipy so pre-built wheels are available on all supported Python versions
 
-### Fine-tuning your own model
-
-You can now fine-tune ChangerEx on your own labelled dataset. Fine-tuning uses OpenCD/MMEngine in a **separate virtual environment** (Python 3.10-3.12) so it doesn't interfere with the main plugin. The resulting `.pth` checkpoint works directly in the plugin and CLI.
-
-See [FINETUNING.md](FINETUNING.md) for the full guide, including dataset preparation, training options, and how to use your fine-tuned model.
-
 ## What changed (v0.4)
 
 This version adds **Semantic Change Detection (SCD)** as a selectable mode alongside the existing binary change detection. Instead of just detecting *where* change occurred, SCD classifies *what* the changed areas became -- water, ground, low vegetation, tree, building, or sports field.
@@ -49,13 +98,6 @@ This version adds **Semantic Change Detection (SCD)** as a selectable mode along
 - Colour-coded legend in QGIS with class names (water, ground, low vegetation, tree, building, sports field)
 - CLI support: `python detect_changes.py --before img1.tif --after img2.tif --mode semantic`
 - Co-registration, tiled inference, and GPU acceleration all work with SCD
-
-### Included Models
-
-| Model | Training Dataset | Architecture | Mode |
-|-------|-----------------|--------------|------|
-| ChangerEx (R18) | LEVIR-CD | ResNet-18 + FDAF | Binary CD |
-| SCD UPerNet (R18) | SECOND | UPerNet + ResNet-18 | Semantic CD |
 
 ## What changed (v0.3)
 
@@ -107,28 +149,16 @@ For full benchmark results and analysis, see [BENCHMARK_REPORT.md](BENCHMARK_REP
 
 A central finding is that most change detection models are **domain-locked** -- they perform well on imagery similar to their training set but struggle on anything else. **The only reliable path to accurate results on a specific area is fine-tuning on labelled data from that region using the same image source.**
 
-## Roadmap
-
-### Phase 1 (current) -- Pretrained inference plugin
-
-An end-to-end QGIS plugin with a pretrained ChangerEx (R18) checkpoint trained on LEVIR-CD. Clone, install, run. Useful for exploratory analysis and as a baseline before fine-tuning.
-
-### Phase 2 -- Custom dataset creation and fine-tuning
-
-Explore workflows for creating labelled change detection datasets from one's own satellite imagery, and fine-tuning on them. The goal is to close the domain gap for a specific area of interest.
-
-### Phase 3 -- Vision-language models for change detection
-
-Integrate VLMs so that users can either specify the type of change they are looking for (e.g. "new buildings", "deforestation", "road construction") or receive a textual description of what changed between the two images. This would move beyond binary change masks toward semantic, interpretable change analysis.
-
 ---
 
-## Phase 1: QGIS Plugin
+## QGIS Plugin
 
 ### Included Models
 
 | Model | Training Dataset | Architecture | Mode |
 |-------|-----------------|--------------|------|
+| **DINOv2 ViT-B/14 (generalizable)** | LEVIR-CD | Frozen ViT-B/14 + FPN decoder | Binary CD |
+| DINOv2 ViT-B/14 (fine-tuned) | LEVIR-CD + domain data | Frozen ViT-B/14 + FPN decoder | Binary CD |
 | ChangerEx (R18) | LEVIR-CD | ResNet-18 + FDAF | Binary CD |
 | SCD UPerNet (R18) | SECOND | UPerNet + ResNet-18 | Semantic CD |
 
@@ -144,8 +174,8 @@ Integrate VLMs so that users can either specify the type of change they are look
 Clone the repository and run the installer:
 
 ```bash
-git clone https://github.com/ja1902/ChangeDetection.git
-cd ChangeDetection
+git clone https://github.com/ja1902/ChangesDetector.git
+cd ChangesDetector
 ```
 
 **Linux:**
@@ -181,25 +211,52 @@ The installer will:
 
 ### Manual Weight Download
 
-If the installer cannot download weights automatically, download them from the [GitHub Releases page](https://github.com/ja1902/ChangeDetection/releases) and place in the project root:
+If the installer cannot download weights automatically, download them from the [GitHub Releases page](https://github.com/ja1902/ChangesDetector/releases) and place in the project root:
 
-- `ChangerEx_r18-512x512_40k_levircd.pth` (binary CD)
-- `scd_upernet_r18_10k_second.pth` (semantic CD)
+- `dinov2_vitb14_levir.pth` (364MB) -- DINOv2 ViT-B/14 generalizable binary CD
+- `dinov2_vitb14_egybcd.pth` (365MB) -- DINOv2 ViT-B/14 fine-tuned binary CD
+- `ChangerEx_r18-512x512_40k_levircd.pth` -- ChangerEx binary CD
+- `scd_upernet_r18_10k_second.pth` -- SCD semantic CD
 
 ### Standalone CLI
 
-For use outside QGIS:
-
 ```bash
+# Binary change detection with DINOv2 (auto threshold)
+python detect_changes.py --before path/to/before.tif --after path/to/after.tif \
+    --model-type dinov2 --weights dinov2_vitb14_levir.pth --threshold auto
+
+# With histogram matching (for mismatched image pairs)
+python detect_changes.py --before path/to/before.tif --after path/to/after.tif \
+    --model-type dinov2 --weights dinov2_vitb14_levir.pth --threshold auto --histogram-match
+
+# Binary change detection with ChangerEx
 python detect_changes.py --before path/to/before.tif --after path/to/after.tif
-```
 
-For semantic change detection:
-```bash
+# Semantic change detection
 python detect_changes.py --before path/to/before.tif --after path/to/after.tif --mode semantic
+
+# Output as GeoPackage polygons
+python detect_changes.py --before path/to/before.tif --after path/to/after.tif \
+    --model-type dinov2 --weights dinov2_vitb14_levir.pth \
+    --threshold auto --output-gpkg changes.gpkg --min-area 100
 ```
 
-Options: `--mode binary|semantic`, `--threshold 0.3`, `--overlap 64`, `--tile-size 256`, `--weights path/to/weights.pth`, `--no-coreg`, `--max-shift 50`, `--coreg-window 1024`
+Options: `--mode binary|semantic`, `--model-type opencd|dinov2`, `--threshold auto|0.3`, `--histogram-match`, `--overlap 32`, `--tile-size 256`, `--weights path/to/weights.pth`, `--no-coreg`, `--max-shift 50`, `--coreg-window 1024`
+
+### Training
+
+`train_dinov2_cd.py` trains DINOv2 decoders on standard change detection datasets (LEVIR-CD format: `train/A/`, `train/B/`, `train/label/`).
+
+```bash
+# Train on LEVIR-CD
+python train_dinov2_cd.py --data-root /path/to/LEVIR-CD --backbone vitb14 --epochs 50
+
+# Fine-tune on a custom dataset
+python train_dinov2_cd.py --data-root /path/to/custom-dataset \
+    --backbone vitb14 --weights work_dirs/decoder_best.pth --epochs 20 --lr 1e-4
+```
+
+The backbone stays frozen; only the decoder trains (~9M params, ~4GB VRAM).
 
 ## Troubleshooting
 
@@ -214,6 +271,10 @@ Options: `--mode binary|semantic`, `--threshold 0.3`, `--overlap 64`, `--tile-si
 
 **"CUDA GPU is not available" error:**
 - Select "CPU" as the device, or install NVIDIA drivers + CUDA toolkit
+
+**GPU out of memory:**
+- Reduce tile size (e.g. `--tile-size 128`) or use `--device cpu`
+- The tiler automatically adjusts batch size and retries on OOM
 
 **Slow inference:**
 - Use GPU if available

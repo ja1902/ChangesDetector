@@ -125,7 +125,7 @@ pip install --no-deps arosics geoarray py_tools_ds
 echo ""
 echo "Downloading model weights..."
 
-GITHUB_RELEASE="https://github.com/ja1902/ChangesDetector/releases/download/v0.5.0"
+GITHUB_RELEASE="https://github.com/ja1902/ChangesDetector/releases/download/v0.6.0"
 
 download_weights() {
     local url="$1"
@@ -150,6 +150,16 @@ download_weights() {
         echo "         $dest"
     fi
 }
+
+download_weights \
+    "$GITHUB_RELEASE/dinov2_vitb14_levir.pth" \
+    "$SCRIPT_DIR/dinov2_vitb14_levir.pth" \
+    "DINOv2 ViT-B/14 (generalizable)"
+
+download_weights \
+    "$GITHUB_RELEASE/dinov2_vitb14_egybcd.pth" \
+    "$SCRIPT_DIR/dinov2_vitb14_egybcd.pth" \
+    "DINOv2 ViT-B/14 (fine-tuned)"
 
 download_weights \
     "$GITHUB_RELEASE/ChangerEx_r18-512x512_40k_levircd.pth" \

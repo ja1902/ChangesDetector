@@ -5,8 +5,9 @@ from qgis.PyQt.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QFormLayout,
     QComboBox, QSpinBox, QDoubleSpinBox, QCheckBox,
     QPushButton, QProgressBar, QTextEdit, QFileDialog,
-    QLineEdit, QMessageBox, QGroupBox,
+    QLineEdit, QMessageBox, QGroupBox, QSlider, QLabel,
 )
+from qgis.PyQt.QtCore import Qt
 from qgis.core import (
     QgsApplication, QgsMapLayerProxyModel, QgsProject, QgsVectorLayer,
     QgsSimpleFillSymbolLayer, QgsSymbol, QgsSingleSymbolRenderer,
@@ -62,6 +63,7 @@ class UChangeDialog(QDialog):
         self._model_registry = MODEL_REGISTRY
         self.model_selector = QComboBox()
         self._populate_model_selector()
+        self.model_selector.currentTextChanged.connect(self._on_model_changed)
         model_form.addRow("Model:", self.model_selector)
 
         self.custom_weights_check = QCheckBox("Use custom weights file")
@@ -92,6 +94,14 @@ class UChangeDialog(QDialog):
         self.coregister_check.setChecked(True)
         proc_form.addRow("", self.coregister_check)
 
+        self.histogram_match_check = QCheckBox("Match image histograms")
+        self.histogram_match_check.setChecked(False)
+        self.histogram_match_check.setToolTip(
+            "Normalize the 'after' image colors to match the 'before' image.\n"
+            "Helps when images have different brightness or color balance."
+        )
+        proc_form.addRow("", self.histogram_match_check)
+
         self.tile_size = QSpinBox()
         self.tile_size.setRange(128, 1024)
         self.tile_size.setSingleStep(64)
@@ -101,25 +111,41 @@ class UChangeDialog(QDialog):
         self.overlap = QSpinBox()
         self.overlap.setRange(0, 256)
         self.overlap.setSingleStep(16)
-        self.overlap.setValue(0)
+        self.overlap.setValue(32)
         proc_form.addRow("Tile overlap:", self.overlap)
 
-        self.threshold = QDoubleSpinBox()
-        self.threshold.setRange(0.0, 1.0)
-        self.threshold.setSingleStep(0.05)
-        self.threshold.setValue(0.5)
-        self.threshold.setDecimals(2)
-        proc_form.addRow("Change threshold:", self.threshold)
+        self.auto_threshold_check = QCheckBox("Auto (recommended)")
+        self.auto_threshold_check.setChecked(True)
+        self.auto_threshold_check.setToolTip(
+            "Automatically find the optimal threshold for this scene.\n"
+            "Works well across different regions and sensors."
+        )
+        self.auto_threshold_check.stateChanged.connect(self._toggle_auto_threshold)
+        proc_form.addRow("Change threshold:", self.auto_threshold_check)
+
+        threshold_layout = QHBoxLayout()
+        self.threshold_slider = QSlider(Qt.Horizontal)
+        self.threshold_slider.setRange(0, 100)
+        self.threshold_slider.setValue(50)
+        self.threshold_slider.setTickPosition(QSlider.TicksBelow)
+        self.threshold_slider.setTickInterval(10)
+        self.threshold_slider.valueChanged.connect(self._on_threshold_slider_changed)
+        self.threshold_label = QLabel("0.50")
+        self.threshold_label.setMinimumWidth(35)
+        threshold_layout.addWidget(self.threshold_slider)
+        threshold_layout.addWidget(self.threshold_label)
+        self.threshold_widget = QGroupBox()
+        self.threshold_widget.setLayout(threshold_layout)
+        self.threshold_widget.setFlat(True)
+        self.threshold_widget.setStyleSheet("QGroupBox { border: none; padding: 0; margin: 0; }")
+        self.threshold_widget.setVisible(False)
+        proc_form.addRow("", self.threshold_widget)
 
         self.min_area = QSpinBox()
         self.min_area.setRange(0, 10000)
         self.min_area.setValue(0)
         self.min_area.setSuffix(" px")
         proc_form.addRow("Min polygon area:", self.min_area)
-
-        self.style_selector = QComboBox()
-        self.style_selector.addItems(["Exact", "Simplified", "Convex hull"])
-        proc_form.addRow("Polygon style:", self.style_selector)
 
         proc_group.setLayout(proc_form)
         layout.addWidget(proc_group)
@@ -165,6 +191,8 @@ class UChangeDialog(QDialog):
         btn_layout.addWidget(self.cancel_btn)
         layout.addLayout(btn_layout)
 
+        self._on_model_changed(self.model_selector.currentText())
+
     def _is_scd_mode(self):
         return self.mode_selector.currentIndex() == 1
 
@@ -175,20 +203,32 @@ class UChangeDialog(QDialog):
             if is_scd_model(name) == scd:
                 self.model_selector.addItem(name)
 
+    def _toggle_auto_threshold(self, state):
+        self.threshold_widget.setVisible(not bool(state))
+
+    def _on_threshold_slider_changed(self, value):
+        self.threshold_label.setText(f"{value / 100:.2f}")
+
     def _on_mode_changed(self, _index):
         scd = self._is_scd_mode()
         self._populate_model_selector()
-        self.threshold.setVisible(not scd)
+        self.auto_threshold_check.setVisible(not scd)
+        self.threshold_widget.setVisible(not scd and not self.auto_threshold_check.isChecked())
         self.min_area.setVisible(not scd)
-        self.style_selector.setVisible(not scd)
-        proc_form = self.threshold.parent().layout()
+        proc_form = self.auto_threshold_check.parent().layout()
         if proc_form:
             for row in range(proc_form.rowCount()):
                 label = proc_form.itemAt(row, QFormLayout.LabelRole)
                 field = proc_form.itemAt(row, QFormLayout.FieldRole)
-                if field and field.widget() in (self.threshold, self.min_area, self.style_selector):
+                if field and field.widget() in (self.auto_threshold_check, self.threshold_widget, self.min_area):
                     if label and label.widget():
                         label.widget().setVisible(not scd)
+
+    def _on_model_changed(self, name):
+        entry = self._model_registry.get(name, {})
+        preferred_tile = entry.get("tile_size")
+        if preferred_tile:
+            self.tile_size.setValue(preferred_tile)
 
     def _toggle_custom_weights(self, state):
         custom = bool(state)
@@ -386,19 +426,28 @@ class UChangeDialog(QDialog):
         if scd_mode:
             cmd.extend(["--mode", "semantic"])
         else:
-            cmd.extend(["--threshold", str(self.threshold.value())])
-            if output_path.endswith(".gpkg"):
-                cmd.extend(["--output-gpkg", output_path])
-                cmd.extend(["--min-area", str(self.min_area.value())])
-                style_map = {"Exact": "exact", "Simplified": "simplified", "Convex hull": "convex"}
-                cmd.extend(["--style", style_map[self.style_selector.currentText()]])
+            if self.auto_threshold_check.isChecked():
+                cmd.extend(["--threshold", "auto"])
+            else:
+                cmd.extend(["--threshold", f"{self.threshold_slider.value() / 100:.2f}"])
+            gpkg_path = output_path
+            if not gpkg_path.endswith(".gpkg"):
+                gpkg_path = os.path.splitext(gpkg_path)[0] + ".gpkg"
+            cmd.extend(["--output-gpkg", gpkg_path])
+            cmd.extend(["--min-area", str(self.min_area.value())])
 
         if not self.coregister_check.isChecked():
             cmd.append("--no-coreg")
 
+        if self.histogram_match_check.isChecked():
+            cmd.append("--histogram-match")
+
         model_name = self.model_selector.currentText()
-        if self._model_registry.get(model_name, {}).get("grayscale", False):
+        model_entry = self._model_registry.get(model_name, {})
+        if model_entry.get("grayscale", False):
             cmd.append("--grayscale")
+        if model_entry.get("type"):
+            cmd.extend(["--model-type", model_entry["type"]])
 
         self._log("Starting inference subprocess...")
         proc = subprocess.Popen(
@@ -469,16 +518,21 @@ class UChangeDialog(QDialog):
     def _handle_binary_result(self, result_info, output_path, output_dir):
         import shutil
 
-        result_output = result_info.get("output_path", "")
-        added_layer = False
+        threshold = result_info.get("threshold")
+        if threshold is not None and self.auto_threshold_check.isChecked():
+            self._log(f"Auto threshold: {threshold:.6f}")
 
-        if output_path.endswith(".gpkg") and os.path.isfile(output_path):
+        gpkg_path = output_path
+        if not gpkg_path.endswith(".gpkg"):
+            gpkg_path = os.path.splitext(gpkg_path)[0] + ".gpkg"
+
+        if os.path.isfile(gpkg_path):
             total_polys = result_info.get("total_polys", 0)
             final_polys = result_info.get("final_polys", 0)
             self._log(f"Polygons: {total_polys} created, {final_polys} after filter")
 
             if self.add_to_project.isChecked():
-                layer = QgsVectorLayer(output_path, "Change Detection", "ogr")
+                layer = QgsVectorLayer(gpkg_path, "Change Detection", "ogr")
                 if layer.isValid():
                     symbol = QgsSymbol.defaultSymbol(layer.geometryType())
                     fill = QgsSimpleFillSymbolLayer()
@@ -489,21 +543,19 @@ class UChangeDialog(QDialog):
                     layer.setRenderer(QgsSingleSymbolRenderer(symbol))
                     QgsProject.instance().addMapLayer(layer)
                     self._log("Layer added to project.")
-                    added_layer = True
+        else:
+            result_output = result_info.get("output_path", "")
+            if result_output and os.path.isfile(result_output):
+                dest = output_path
+                shutil.copy2(result_output, dest)
+                self._log(f"Saved: {dest}")
 
-        if not added_layer and result_output and os.path.isfile(result_output):
-            dest = output_path
-            if dest.endswith(".gpkg"):
-                dest = os.path.splitext(dest)[0] + os.path.splitext(result_output)[1]
-            shutil.copy2(result_output, dest)
-            self._log(f"Saved: {dest}")
-
-            if self.add_to_project.isChecked():
-                from qgis.core import QgsRasterLayer
-                layer = QgsRasterLayer(dest, "Change Detection")
-                if layer.isValid():
-                    QgsProject.instance().addMapLayer(layer)
-                    self._log("Layer added to project.")
+                if self.add_to_project.isChecked():
+                    from qgis.core import QgsRasterLayer
+                    layer = QgsRasterLayer(dest, "Change Detection")
+                    if layer.isValid():
+                        QgsProject.instance().addMapLayer(layer)
+                        self._log("Layer added to project.")
 
     def _handle_scd_result(self, result_info, output_dir):
         output_base = self.output_path.text()

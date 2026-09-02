@@ -4,11 +4,13 @@ _PLUGIN_DIR = os.path.realpath(os.path.dirname(__file__))
 _PROJECT_ROOT = os.path.normpath(os.path.join(_PLUGIN_DIR, ".."))
 
 MODEL_REGISTRY = {
-    "ChangerEx (R18) - LEVIR-CD (buildings)":  {"file": "ChangerEx_r18-512x512_40k_levircd.pth", "type": "opencd"},
-    "SCD UPerNet (R18) - SECOND (land cover)": {"file": "scd_upernet_r18_10k_second.pth", "type": "opencd_scd"},
+    "DINOv2 ViT-B (generalizable)":  {"file": "dinov2_vitb14_levir.pth", "type": "dinov2"},
+    "DINOv2 ViT-B (fine-tuned)":     {"file": "dinov2_vitb14_egybcd.pth", "type": "dinov2"},
+    "ChangerEx (R18) - LEVIR-CD (buildings)":   {"file": "ChangerEx_r18-512x512_40k_levircd.pth", "type": "opencd"},
+    "SCD UPerNet (R18) - SECOND (land cover)":  {"file": "scd_upernet_r18_10k_second.pth", "type": "opencd_scd"},
 }
 
-DEFAULT_WEIGHTS = "ChangerEx_r18-512x512_40k_levircd.pth"
+DEFAULT_WEIGHTS = "dinov2_vitb14_egybcd.pth"
 
 SECOND_SEMANTIC_CLASSES = (
     'unchanged', 'water', 'ground',

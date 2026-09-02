@@ -132,6 +132,32 @@ def save_binary_geotiff(binary_mask, geotransform, projection_wkt, output_path):
     ds = None
 
 
+def _remove_small_holes(geom, min_area):
+    """Remove interior rings (holes) smaller than min_area from a polygon."""
+    if min_area <= 0:
+        return geom
+    geom_type = geom.GetGeometryType()
+    if geom_type == ogr.wkbPolygon:
+        if geom.GetGeometryCount() <= 1:
+            return geom
+        exterior = geom.GetGeometryRef(0).Clone()
+        new_poly = ogr.Geometry(ogr.wkbPolygon)
+        new_poly.AddGeometry(exterior)
+        for i in range(1, geom.GetGeometryCount()):
+            ring = geom.GetGeometryRef(i)
+            hole = ogr.Geometry(ogr.wkbPolygon)
+            hole.AddGeometry(ring.Clone())
+            if abs(hole.GetArea()) >= min_area:
+                new_poly.AddGeometry(ring.Clone())
+        return new_poly
+    elif geom_type == ogr.wkbMultiPolygon:
+        new_multi = ogr.Geometry(ogr.wkbMultiPolygon)
+        for i in range(geom.GetGeometryCount()):
+            new_multi.AddGeometry(_remove_small_holes(geom.GetGeometryRef(i), min_area))
+        return new_multi
+    return geom
+
+
 def polygonize_mask(binary_mask, geotransform, projection_wkt, output_path,
                     min_area=0, style='exact'):
     """Convert a binary mask to vector polygons and save as GeoPackage.
@@ -184,6 +210,7 @@ def polygonize_mask(binary_mask, geotransform, projection_wkt, output_path,
         if min_area > 0 and geom.GetArea() < min_area:
             to_delete.append(feat.GetFID())
             continue
+        geom = _remove_small_holes(geom, min_area)
         styled = _apply_style(geom, style, pixel_w)
         feat.SetGeometry(styled)
         layer.SetFeature(feat)
