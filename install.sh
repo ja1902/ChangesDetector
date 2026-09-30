@@ -151,6 +151,19 @@ download_weights() {
     fi
 }
 
+# v0.7+ recommended model (DINOv2 decoder trained on Changen2 synthetic data + LEVIR-CD)
+# and the v0.8 land-cover head for labelled change (OpenEarthMap + SECOND).
+# Research / non-commercial use (CC BY-NC-SA 4.0 training data).
+download_weights \
+    "https://github.com/ja1902/ChangesDetector/releases/download/v0.8.0/dinov2_vitb14_c2s1_levir.pth" \
+    "$SCRIPT_DIR/dinov2_vitb14_c2s1_levir.pth" \
+    "DINOv2 ViT-B/14 + synthetic data (recommended)"
+
+download_weights \
+    "https://github.com/ja1902/ChangesDetector/releases/download/v0.8.0/landcover_dinov2_vitb14_oem_second.pth" \
+    "$SCRIPT_DIR/landcover_dinov2_vitb14_oem_second.pth" \
+    "DINOv2 land-cover head (labelled change)"
+
 download_weights \
     "$GITHUB_RELEASE/dinov2_vitb14_levir.pth" \
     "$SCRIPT_DIR/dinov2_vitb14_levir.pth" \

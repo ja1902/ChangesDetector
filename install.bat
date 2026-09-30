@@ -74,6 +74,35 @@ echo Downloading model weights...
 
 set "GITHUB_RELEASE=https://github.com/ja1902/ChangesDetector/releases/download/v0.6.0"
 
+:: v0.7 recommended model (DINOv2 decoder trained on Changen2 synthetic data + LEVIR-CD).
+:: Its training data is CC BY-NC-SA 4.0: research / non-commercial use.
+set "SYNTH_WEIGHTS=%SCRIPT_DIR%\dinov2_vitb14_c2s1_levir.pth"
+if exist "%SYNTH_WEIGHTS%" (
+    echo DINOv2 synthetic-data weights already exist, skipping download.
+) else (
+    echo Downloading DINOv2 ViT-B/14 + synthetic data [recommended]...
+    curl -L --fail --progress-bar -o "%SYNTH_WEIGHTS%" "https://github.com/ja1902/ChangesDetector/releases/download/v0.8.0/dinov2_vitb14_c2s1_levir.pth"
+    if !errorlevel! neq 0 (
+        del "%SYNTH_WEIGHTS%" 2>nul
+        echo WARNING: Download failed. Please download manually.
+        echo          Place the file at: %SYNTH_WEIGHTS%
+    )
+)
+
+:: v0.8 land-cover head for labelled (from -> to) change.
+set "LC_HEAD=%SCRIPT_DIR%\landcover_dinov2_vitb14_oem_second.pth"
+if exist "%LC_HEAD%" (
+    echo Land-cover head already exists, skipping download.
+) else (
+    echo Downloading DINOv2 land-cover head [labelled change]...
+    curl -L --fail --progress-bar -o "%LC_HEAD%" "https://github.com/ja1902/ChangesDetector/releases/download/v0.8.0/landcover_dinov2_vitb14_oem_second.pth"
+    if !errorlevel! neq 0 (
+        del "%LC_HEAD%" 2>nul
+        echo WARNING: Download failed. Please download manually.
+        echo          Place the file at: %LC_HEAD%
+    )
+)
+
 set "LEVIR_WEIGHTS=%SCRIPT_DIR%\dinov2_vitb14_levir.pth"
 if exist "%LEVIR_WEIGHTS%" (
     echo DINOv2 generalizable weights already exist, skipping download.

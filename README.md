@@ -2,6 +2,58 @@
 
 A research project exploring automated change detection between georeferenced satellite images, delivered as a QGIS plugin.
 
+## What changed (v0.8)
+
+### Labelled change: what changed into what
+
+Semantic mode has a new recommended model, **DINOv2 ViT-B + land cover, from -> to**. The v0.7 DINOv2 model finds the changes; a land-cover head on the same frozen backbone (trained on OpenEarthMap, 44 countries, plus SECOND) classifies each date. Every change polygon gets one before class and one after class (the majority inside it) and is written to a GeoPackage with the fields `from_class`, `to_class`, `change` (e.g. "farmland -> building") and `area`. Classes: bare ground, grass / low vegetation, paved / road, trees, water, farmland, building. The layer is coloured by what each area became.
+
+Share of truly changed pixels whose before *and* after class are right:
+
+| | SECOND (China) | HRSCD (France, never seen) |
+|---|---|---|
+| SCD UPerNet (v0.7) | 60% | 40% |
+| **DINOv2 + land cover (v0.8)** | **63%** | **50%** |
+
+Changes are found by the building-focused v0.7 model, so this mode suits building and urban change: on the French data it found changes far better than the UPerNet (IoU 0.22 vs 0.05). Changes that involve no building, such as forest cleared for farmland, are largely missed. Needs `landcover_dinov2_vitb14_oem_second.pth` (the installer downloads it). CLI: `--model-type dinov2_lc --preset synthetic --threshold auto --output-gpkg out.gpkg`.
+
+### Fixes
+
+- **CPU**: DINOv2 models crashed on computers without an NVIDIA GPU (float16 weights, float32 inputs); they now run in float32 on CPU.
+
+## What changed (v0.7)
+
+v0.7 targets three problems: working on new regions, sensors and resolutions without retraining; false alarms on angled (off-nadir) imagery; and naming what changed into what.
+
+### New default model: DINOv2 + synthetic change data
+
+Same architecture and file format as the v0.6 DINOv2 model, but the decoder is trained on [Changen2](https://github.com/Z-Zheng/pytorch-change-models) synthetic change pairs plus LEVIR-CD (`dinov2_vitb14_c2s1_levir.pth`). IoU on test sets, with each model's threshold picked on a *different* unseen dataset (the fair setting for new imagery; v0.6's own auto-threshold scored lower, e.g. 0.20 on S2Looking):
+
+| IoU | S2Looking | EGY-BCD | LEVIR-CD |
+|---|---|---|---|
+| v0.6 DINOv2 (generalizable) | 0.27 | 0.43 | 0.84 |
+| **v0.7 DINOv2 + synthetic** | **0.35** | **0.55** | 0.76-0.80 |
+| v0.7 Changen2 ViT-L + DINOv2 (optional) | **0.40** | 0.53 | 0.80 |
+
+At the same detection rate it raises about 4x fewer false alarms than v0.6 on imagery of the same place seen from different angles (SpaceNet MVOI). Trained on CC BY-NC-SA 4.0 data: research / non-commercial use.
+
+### Each model runs the way it was tested
+
+Models now carry a preset: 1.4x upscaling, flip averaging, logit adjustment and a threshold chosen on imagery the model had not seen. The "Change threshold" box is now **Recommended**: for preset models it uses that tested threshold, not the per-scene estimate (which reached only ~70% of the best possible IoU on unfamiliar data). CLI: `--preset synthetic` or `--preset ensemble` with `--threshold auto`.
+
+### Coarse imagery is resampled automatically
+
+Every model collapses on imagery much coarser than it was trained on (2 m LEVIR: IoU about 0.1). Rasters whose pixel size is coarser than 0.5 m are now resampled to 0.5 m before detection, and results are written at the original resolution. On 2 m test GeoTIFFs this took the new model from 0.39 to 0.73 IoU. CLI: `--target-gsd 0.5` (0 to turn off).
+
+### Optional: Changen2 ViT-L + DINOv2 (most accurate)
+
+Runs the Changen2 ChangeStar ViT-L model alongside the DINOv2 model and keeps only change both agree on. It needs the optional `torchange` package (the plugin prints install instructions) and is slower; ChangeStar weights are CC BY-NC-SA 4.0.
+
+### Fixes
+
+- **Semantic change legend**: the SCD UPerNet's outputs were shown with the wrong class names (low vegetation as "water", tree as "low vegetation", water as "tree"). With the corrected order its SeK on SECOND rises from 0.13 to 0.20.
+- **Newer GPUs**: DINOv2 models failed on RTX 30-series and newer (float16 weights under bfloat16 autocast); autocast now follows the model's precision.
+
 ## What changed (v0.6)
 
 CNN-based models like ChangerEx are **domain-locked** -- they achieve high F1 on in-domain data but fail on imagery from different regions or sensors. This version tackles that problem with a **DINOv2 vision transformer** for **generalizable change detection**. After 21 experiments (see [EXPERIMENTS.md](EXPERIMENTS.md)), the key finding is a fundamental trade-off between in-domain accuracy and cross-domain generalization: techniques that improve performance on the training domain consistently hurt generalization to unseen domains. Frozen DINOv2 features with a simple FPN decoder emerged as the best balance -- sacrificing a few points of in-domain F1 for reliable cross-domain performance.
@@ -157,7 +209,9 @@ A central finding is that most change detection models are **domain-locked** -- 
 
 | Model | Training Dataset | Architecture | Mode |
 |-------|-----------------|--------------|------|
-| **DINOv2 ViT-B/14 (generalizable)** | LEVIR-CD | Frozen ViT-B/14 + FPN decoder | Binary CD |
+| **DINOv2 ViT-B + synthetic data (recommended)** | Changen2 synthetic + LEVIR-CD | Frozen ViT-B/14 + FPN decoder | Binary CD |
+| **DINOv2 ViT-B + land cover, from -> to (recommended)** | as above + OpenEarthMap + SECOND | Same backbone + land-cover head | Labelled CD |
+| DINOv2 ViT-B/14 (generalizable) | LEVIR-CD | Frozen ViT-B/14 + FPN decoder | Binary CD |
 | DINOv2 ViT-B/14 (fine-tuned) | LEVIR-CD + domain data | Frozen ViT-B/14 + FPN decoder | Binary CD |
 | ChangerEx (R18) | LEVIR-CD | ResNet-18 + FDAF | Binary CD |
 | SCD UPerNet (R18) | SECOND | UPerNet + ResNet-18 | Semantic CD |

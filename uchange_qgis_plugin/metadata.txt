@@ -1,14 +1,14 @@
 [general]
 name=ChangeDetection
 qgisMinimumVersion=3.22
-description=Satellite image change detection using ChangerEx deep learning models with CPU/GPU support
-version=0.5.0
+description=Satellite image change detection with DINOv2 deep learning models, including labelled (from -> to) change, on CPU or GPU
+version=0.8.0
 author=ChangeDetection
 email=uchange@example.com
-about=Detects changes between two georeferenced satellite images using deep learning. Supports binary change detection (ChangerEx R18, LEVIR-CD) and semantic change detection (SCD UPerNet R18, SECOND). Includes automatic co-registration, fine-tuning support, and CPU/GPU inference. Works with Python 3.10-3.14.
-tracker=https://github.com/ja1902/ChangeDetection/issues
-repository=https://github.com/ja1902/ChangeDetection
-tags=change detection,remote sensing,deep learning,changerex,opencd
+about=Detects changes between two georeferenced images using deep learning. Binary change detection with DINOv2 models that generalise to new regions and resolutions (plus ChangerEx R18), and labelled change: each change polygon gets its before and after land-cover class (DINOv2 + land-cover head; SCD UPerNet R18 also included). Includes automatic co-registration, resampling of coarse imagery, and CPU/GPU inference. Works with Python 3.10-3.14. Model weights are for research / non-commercial use.
+tracker=https://github.com/ja1902/ChangesDetector/issues
+repository=https://github.com/ja1902/ChangesDetector
+tags=change detection,remote sensing,deep learning,dinov2,semantic change,land cover
 category=Raster
 icon=icon.png
 experimental=True

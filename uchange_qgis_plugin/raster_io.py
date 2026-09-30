@@ -225,3 +225,64 @@ def polygonize_mask(binary_mask, geotransform, projection_wkt, output_path,
     mem_ds = None
 
     return total_features, final_features
+
+
+def polygonize_labelled_changes(blobs, from_cls, to_cls, class_names, geotransform,
+                                projection_wkt, output_path, min_area=0, style='exact'):
+    """Change blobs -> GeoPackage polygons carrying their before/after class.
+
+    Args:
+        blobs: 2D int32 array of blob ids (0 = no change)
+        from_cls, to_cls: per-blob class ids (index = blob id)
+        class_names: names for the class ids
+        min_area: minimum polygon area in map units
+    Fields: from_class, to_class, change ("farmland -> building"), area.
+    """
+    h, w = blobs.shape
+    mem_ds = gdal.GetDriverByName("MEM").Create("", w, h, 1, gdal.GDT_Int32)
+    mem_ds.SetGeoTransform(geotransform)
+    mem_ds.SetProjection(projection_wkt)
+    mem_band = mem_ds.GetRasterBand(1)
+    mem_band.WriteArray(blobs)
+    mem_band.FlushCache()
+
+    out_ds = ogr.GetDriverByName("GPKG").CreateDataSource(output_path)
+    srs = None
+    if projection_wkt:
+        srs = osr.SpatialReference()
+        srs.ImportFromWkt(projection_wkt)
+    layer = out_ds.CreateLayer("changes", srs=srs, geom_type=ogr.wkbPolygon)
+    layer.CreateField(ogr.FieldDefn("blob", ogr.OFTInteger))
+    for name in ("from_class", "to_class", "change"):
+        layer.CreateField(ogr.FieldDefn(name, ogr.OFTString))
+    layer.CreateField(ogr.FieldDefn("area", ogr.OFTReal))
+
+    gdal.Polygonize(mem_band, mem_band, layer, 0, ["8CONNECTED=8"], callback=None)
+    total = layer.GetFeatureCount()
+    pixel_w = abs(geotransform[1])
+
+    layer.ResetReading()
+    to_delete = []
+    for feat in layer:
+        geom = feat.GetGeometryRef()
+        if geom is None:
+            continue
+        if min_area > 0 and geom.GetArea() < min_area:
+            to_delete.append(feat.GetFID())
+            continue
+        k = feat.GetField("blob")
+        a, b = class_names[from_cls[k]], class_names[to_cls[k]]
+        geom = _apply_style(_remove_small_holes(geom, min_area), style, pixel_w)
+        feat.SetGeometry(geom)
+        feat.SetField("from_class", a)
+        feat.SetField("to_class", b)
+        feat.SetField("change", "%s -> %s" % (a, b))
+        feat.SetField("area", geom.GetArea())
+        layer.SetFeature(feat)
+    for fid in to_delete:
+        layer.DeleteFeature(fid)
+    final = layer.GetFeatureCount()
+    out_ds.FlushCache()
+    out_ds = None
+    mem_ds = None
+    return total, final

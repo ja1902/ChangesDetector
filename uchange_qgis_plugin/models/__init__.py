@@ -86,7 +86,11 @@ def build_dinov2_model(checkpoint_path, device):
     model = DINOv2ChangeDetector(
         backbone, decoder, cfg['layer_indices'],
     )
-    model.half().to(device).eval()
+    # float16 only on GPU: on CPU it is slow and the float32 inputs would not
+    # match the halved weights.
+    if device.type == "cuda":
+        model.half()
+    model.to(device).eval()
 
     params = sum(p.numel() for p in model.parameters()) / 1e6
     summary = (f"Model: DINOv2 ViT-B/14 ({params:.1f}M) | "

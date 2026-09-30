@@ -1,5 +1,20 @@
+import math
+
 import numpy as np
 from concurrent.futures import ThreadPoolExecutor
+
+from .model_registry import SCD_OUTPUT_TO_SECOND
+
+# LEVIR-CD change prior used for logit adjustment (see model_registry.PRESETS).
+PI_SOURCE = 0.0584
+
+# Flip test-time augmentation: (flip dims) applied to inputs and undone on logits.
+_TTA_FLIPS = ((), (-1,), (-2,), (-2, -1))
+
+
+def logit_adjust_offset(pi_source=PI_SOURCE):
+    """log(pi / (1 - pi)): subtracted from the change logit to remove the prior."""
+    return math.log(pi_source / (1.0 - pi_source))
 
 
 def histogram_match(source, reference):
@@ -142,16 +157,33 @@ def _prepare_batch(tiles_slice, pre_img, post_img, tile_size, grayscale=False,
     return pre_batch, post_batch, tile_meta
 
 
-def _get_amp_dtype(device):
+def _get_amp_dtype(device, model=None):
     import torch
     if device.type != "cuda":
         return None
+    # A model stored in float16 (the DINOv2 loader halves its weights) must run
+    # under float16 autocast: bfloat16 activations hitting float16 BatchNorm
+    # weights fail on Ampere and newer GPUs.
+    if model is not None:
+        param = next(model.parameters(), None)
+        if param is not None and param.dtype == torch.float16:
+            return torch.float16
     # Ampere (sm_80+) has native bfloat16; older GPUs (Turing, Volta) use float16
     major, _ = torch.cuda.get_device_capability(device)
     return torch.bfloat16 if major >= 8 else torch.float16
 
 
-def _run_batch(model, pre_batch, post_batch, device):
+def _change_probs(logits, logit_adjust):
+    """(B,2,H,W) logits -> (B,H,W) change probability."""
+    import torch
+    logits = logits.float()
+    if logit_adjust:
+        diff = logits[:, 1] - logits[:, 0] - logit_adjust_offset()
+        return torch.sigmoid(diff)
+    return torch.softmax(logits, dim=1)[:, 1]
+
+
+def _run_batch(model, pre_batch, post_batch, device, tta=False, logit_adjust=False):
     import torch
 
     pre = torch.from_numpy(pre_batch).float()
@@ -164,7 +196,7 @@ def _run_batch(model, pre_batch, post_batch, device):
         pre = pre.to(device)
         post = post.to(device)
 
-    amp_dtype = _get_amp_dtype(device)
+    amp_dtype = _get_amp_dtype(device, model)
     use_amp = amp_dtype is not None
 
     with torch.inference_mode(), torch.amp.autocast("cuda", enabled=use_amp, dtype=amp_dtype or torch.float32):
@@ -176,14 +208,22 @@ def _run_batch(model, pre_batch, post_batch, device):
             sem_to = output['seg_logits_to'].float().argmax(dim=1).cpu().numpy()
             return {'binary_probs': binary_probs, 'semantic_from': sem_from, 'semantic_to': sem_to}
 
-        probs = torch.softmax(output.float(), dim=1)[:, 1].cpu().numpy()
+        if tta:
+            # Average the logits over the four flips (the evaluated pipeline).
+            logits = output.float()
+            for dims in _TTA_FLIPS[1:]:
+                out = model(torch.flip(pre, dims), torch.flip(post, dims))
+                logits = logits + torch.flip(out.float(), dims)
+            output = logits / len(_TTA_FLIPS)
+
+        probs = _change_probs(output, logit_adjust).cpu().numpy()
 
     return probs
 
 
 def run_tiled_inference(model, pre_img, post_img, tile_size, overlap, device,
                         progress_fn=None, cancel_fn=None, grayscale=False,
-                        hist_match=False):
+                        hist_match=False, tta=False, logit_adjust=False):
     h, w = pre_img.shape[:2]
     scd_mode = getattr(model, 'is_scd', False)
 
@@ -220,7 +260,8 @@ def run_tiled_inference(model, pre_img, post_img, tile_size, overlap, device,
                     )
 
                 try:
-                    result = _run_batch(model, pre_batch, post_batch, device)
+                    result = _run_batch(model, pre_batch, post_batch, device,
+                                        tta=tta, logit_adjust=logit_adjust)
                 except RuntimeError as e:
                     if "out of memory" not in str(e).lower() or batch_size <= 1:
                         raise
@@ -255,8 +296,10 @@ def run_tiled_inference(model, pre_img, post_img, tile_size, overlap, device,
     prob_map = (prob_map / count_map).astype(np.float32)
 
     if scd_mode:
-        semantic_from = votes_from.argmax(axis=0).astype(np.uint8)
-        semantic_to = votes_to.argmax(axis=0).astype(np.uint8)
+        # Model output index -> 0-based SECOND class index (SECOND_SEMANTIC_CLASSES[1:]).
+        remap = np.array(SCD_OUTPUT_TO_SECOND, dtype=np.uint8)[1:] - 1
+        semantic_from = remap[votes_from.argmax(axis=0)]
+        semantic_to = remap[votes_to.argmax(axis=0)]
         return {
             'prob_map': prob_map,
             'semantic_from': semantic_from,

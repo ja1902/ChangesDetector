@@ -11,13 +11,15 @@ from qgis.PyQt.QtCore import Qt
 from qgis.core import (
     QgsApplication, QgsMapLayerProxyModel, QgsProject, QgsVectorLayer,
     QgsSimpleFillSymbolLayer, QgsSymbol, QgsSingleSymbolRenderer,
+    QgsCategorizedSymbolRenderer, QgsRendererCategory,
 )
 from qgis.PyQt.QtGui import QColor
 from qgis.gui import QgsMapLayerComboBox
 
 from .model_registry import (
-    MODEL_REGISTRY, is_scd_model, resolve_weights_path,
+    MODEL_REGISTRY, is_scd_model, is_labelled_model, resolve_weights_path,
     SECOND_SEMANTIC_CLASSES, SECOND_SEMANTIC_PALETTE,
+    LANDCOVER_CLASSES, LANDCOVER_PALETTE,
 )
 
 
@@ -114,11 +116,12 @@ class UChangeDialog(QDialog):
         self.overlap.setValue(32)
         proc_form.addRow("Tile overlap:", self.overlap)
 
-        self.auto_threshold_check = QCheckBox("Auto (recommended)")
+        self.auto_threshold_check = QCheckBox("Recommended")
         self.auto_threshold_check.setChecked(True)
         self.auto_threshold_check.setToolTip(
-            "Automatically find the optimal threshold for this scene.\n"
-            "Works well across different regions and sensors."
+            "Use the threshold tested for the selected model on imagery it had\n"
+            "not seen. Older models without a tested threshold estimate one per\n"
+            "scene instead (less reliable). Untick to set it by hand."
         )
         self.auto_threshold_check.stateChanged.connect(self._toggle_auto_threshold)
         proc_form.addRow("Change threshold:", self.auto_threshold_check)
@@ -196,6 +199,14 @@ class UChangeDialog(QDialog):
     def _is_scd_mode(self):
         return self.mode_selector.currentIndex() == 1
 
+    def _is_labelled(self):
+        """Semantic mode with a model that writes labelled polygons."""
+        return (self._is_scd_mode() and not self.custom_weights_check.isChecked()
+                and is_labelled_model(self.model_selector.currentText()))
+
+    def _raster_output(self):
+        return self._is_scd_mode() and not self._is_labelled()
+
     def _populate_model_selector(self):
         scd = self._is_scd_mode()
         self.model_selector.clear()
@@ -210,8 +221,12 @@ class UChangeDialog(QDialog):
         self.threshold_label.setText(f"{value / 100:.2f}")
 
     def _on_mode_changed(self, _index):
-        scd = self._is_scd_mode()
         self._populate_model_selector()
+        self._on_mode_changed_visibility()
+
+    def _on_mode_changed_visibility(self):
+        # Threshold and min-area apply to everything that writes polygons.
+        scd = self._raster_output()
         self.auto_threshold_check.setVisible(not scd)
         self.threshold_widget.setVisible(not scd and not self.auto_threshold_check.isChecked())
         self.min_area.setVisible(not scd)
@@ -225,15 +240,21 @@ class UChangeDialog(QDialog):
                         label.widget().setVisible(not scd)
 
     def _on_model_changed(self, name):
+        if name:
+            self._on_mode_changed_visibility()
         entry = self._model_registry.get(name, {})
         preferred_tile = entry.get("tile_size")
         if preferred_tile:
             self.tile_size.setValue(preferred_tile)
+        preferred_overlap = entry.get("overlap")
+        if preferred_overlap is not None:
+            self.overlap.setValue(preferred_overlap)
 
     def _toggle_custom_weights(self, state):
         custom = bool(state)
         self.weights_row_widget.setVisible(custom)
         self.model_selector.setEnabled(not custom)
+        self._on_mode_changed_visibility()
 
     def _get_weights_path(self):
         if self.custom_weights_check.isChecked() and self.weights_path.text():
@@ -248,7 +269,7 @@ class UChangeDialog(QDialog):
             self.weights_path.setText(path)
 
     def _browse_output(self):
-        if self._is_scd_mode():
+        if self._raster_output():
             path, _ = QFileDialog.getSaveFileName(
                 self, "Save SCD output", "", "GeoTIFF (*.tif)"
             )
@@ -286,7 +307,7 @@ class UChangeDialog(QDialog):
                 "Run the installer to download weights, or use a custom weights file.")
             return False
         if not self.output_path.text():
-            label = "output GeoTIFF path" if self._is_scd_mode() else "output GeoPackage path"
+            label = "output GeoTIFF path" if self._raster_output() else "output GeoPackage path"
             QMessageBox.warning(self, "Error", f"Specify an {label}.")
             return False
         return True
@@ -423,7 +444,7 @@ class UChangeDialog(QDialog):
             "--json-progress",
         ]
 
-        if scd_mode:
+        if scd_mode and not self._is_labelled():
             cmd.extend(["--mode", "semantic"])
         else:
             if self.auto_threshold_check.isChecked():
@@ -448,6 +469,8 @@ class UChangeDialog(QDialog):
             cmd.append("--grayscale")
         if model_entry.get("type"):
             cmd.extend(["--model-type", model_entry["type"]])
+        if model_entry.get("preset") and not self.custom_weights_check.isChecked():
+            cmd.extend(["--preset", model_entry["preset"]])
 
         self._log("Starting inference subprocess...")
         proc = subprocess.Popen(
@@ -502,7 +525,9 @@ class UChangeDialog(QDialog):
 
         self._set_progress(90)
 
-        if scd_mode:
+        if result_info.get("mode") == "labelled":
+            self._handle_labelled_result(result_info, output_path, output_dir)
+        elif scd_mode:
             self._handle_scd_result(result_info, output_dir)
         else:
             self._handle_binary_result(result_info, output_path, output_dir)
@@ -520,7 +545,7 @@ class UChangeDialog(QDialog):
 
         threshold = result_info.get("threshold")
         if threshold is not None and self.auto_threshold_check.isChecked():
-            self._log(f"Auto threshold: {threshold:.6f}")
+            self._log(f"Threshold used: {threshold:.6f}")
 
         gpkg_path = output_path
         if not gpkg_path.endswith(".gpkg"):
@@ -556,6 +581,41 @@ class UChangeDialog(QDialog):
                     if layer.isValid():
                         QgsProject.instance().addMapLayer(layer)
                         self._log("Layer added to project.")
+
+    def _handle_labelled_result(self, result_info, output_path, output_dir):
+        """Polygons coloured by what each change became; before/after rasters beside them."""
+        import shutil
+
+        gpkg_path = result_info.get("output_path") or output_path
+        base = os.path.splitext(gpkg_path)[0]
+        for tag in ("from", "to"):
+            src = result_info.get(f"{tag}_path")
+            if src and os.path.isfile(src):
+                dest = f"{base}_landcover_{tag}.tif"
+                shutil.copy2(src, dest)
+                self._log(f"Saved: {dest}")
+        if not os.path.isfile(gpkg_path):
+            return
+        self._log(f"Polygons: {result_info.get('total_polys', 0)} created, "
+                  f"{result_info.get('final_polys', 0)} after filter")
+        if not self.add_to_project.isChecked():
+            return
+        layer = QgsVectorLayer(gpkg_path, "Labelled change", "ogr")
+        if not layer.isValid():
+            return
+        categories = []
+        for name, (r, g, b) in zip(LANDCOVER_CLASSES[1:], LANDCOVER_PALETTE[1:]):
+            symbol = QgsSymbol.defaultSymbol(layer.geometryType())
+            fill = QgsSimpleFillSymbolLayer()
+            fill.setColor(QColor(r, g, b, 90))
+            fill.setStrokeColor(QColor(r, g, b))
+            fill.setStrokeWidth(0.6)
+            symbol.changeSymbolLayer(0, fill)
+            categories.append(QgsRendererCategory(name, symbol, f"became {name}"))
+        layer.setRenderer(QgsCategorizedSymbolRenderer("to_class", categories))
+        QgsProject.instance().addMapLayer(layer)
+        self._log("Layer 'Labelled change' added (colour = what it became; "
+                  "see the 'change' field for from -> to).")
 
     def _handle_scd_result(self, result_info, output_dir):
         output_base = self.output_path.text()

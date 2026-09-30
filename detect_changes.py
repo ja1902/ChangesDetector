@@ -6,6 +6,11 @@ Usage:
     python detect_changes.py --before before.png --after after.png --output my_result
     python detect_changes.py --before before.tif --after after.tif --threshold 0.3 --tile-size 256
     python detect_changes.py --before before.tif --after after.tif --mode semantic --weights scd_upernet_r18_10k_second.pth
+
+Recommended (v0.7) models run with the pipeline they were evaluated with:
+    python detect_changes.py --before b.tif --after a.tif --model-type dinov2         --weights dinov2_vitb14_c2s1_levir.pth --preset synthetic --threshold auto
+    python detect_changes.py --before b.tif --after a.tif --model-type ensemble         --weights dinov2_vitb14_c2s1_levir.pth --preset ensemble --threshold auto
+With a preset, "--threshold auto" means the model's tested threshold.
 """
 
 import sys
@@ -20,6 +25,8 @@ import numpy as np
 from PIL import Image
 
 import torch
+
+from uchange_qgis_plugin.model_registry import PRESETS
 
 
 _json_progress = False
@@ -104,6 +111,60 @@ def save_geotiff(path, array, geo_info):
     ds = None
 
 
+def label_changes(args, model, head, device, binary_mask, before_img, after_img,
+                  geo_info, lc_factor):
+    """Name every change blob: majority land cover before and after.
+
+    Land cover runs at the pixel-size-corrected resolution (without the change
+    model's extra upscaling), which is how the land-cover head was evaluated.
+    """
+    from collections import Counter
+
+    from PIL import Image
+    from uchange_qgis_plugin.landcover import (
+        LANDCOVER_CLASSES, LANDCOVER_PALETTE, label_blobs, predict_landcover)
+    from uchange_qgis_plugin.raster_io import (
+        _smooth_mask, polygonize_labelled_changes, save_semantic_geotiff)
+    from uchange_qgis_plugin.resolution import resample_rgb
+
+    h, w = binary_mask.shape
+    maps = []
+    for i, (name, img) in enumerate((("before", before_img), ("after", after_img))):
+        _log(f"Land cover ({name})...")
+        lc = predict_landcover(
+            model, head, resample_rgb(img, lc_factor), device,
+            progress_fn=lambda c, t, i=i: _progress(85 + 5 * i + int(5 * c / t)))
+        if lc.shape != (h, w):
+            lc = np.array(Image.fromarray(lc).resize((w, h), Image.NEAREST))
+        maps.append(lc)
+
+    blobs, from_cls, to_cls = label_blobs(_smooth_mask(binary_mask), *maps)
+    gt, proj = geo_info["geotransform"], geo_info["projection"]
+    out = {"mode": "labelled"}
+    for tag, cls in (("from", from_cls), ("to", to_cls)):
+        path = os.path.join(args.output, f"landcover_{tag}.tif")
+        save_semantic_geotiff(cls[blobs], gt, proj, path, LANDCOVER_CLASSES, LANDCOVER_PALETTE)
+        out[f"{tag}_path"] = path
+
+    px_area = abs(gt[1] * gt[5])
+    areas = np.bincount(blobs.ravel(), minlength=len(from_cls)) * px_area
+    kinds = Counter()
+    for k in range(1, len(from_cls)):
+        kinds[f"{LANDCOVER_CLASSES[from_cls[k]]} -> {LANDCOVER_CLASSES[to_cls[k]]}"] += areas[k]
+    for kind, area in kinds.most_common(6):
+        _log(f"  {kind}: {area:,.0f} map units^2")
+
+    if args.output_gpkg:
+        _log(f"Polygonizing to {args.output_gpkg}...")
+        total, final = polygonize_labelled_changes(
+            blobs, from_cls, to_cls, LANDCOVER_CLASSES, gt, proj, args.output_gpkg,
+            min_area=args.min_area * px_area,
+            style="convex hull" if args.style == "convex" else args.style)
+        _log(f"Polygons: {total} created, {final} after min-area filter")
+        out.update(output_path=args.output_gpkg, total_polys=total, final_polys=final)
+    return out
+
+
 def main():
     global _json_progress
 
@@ -117,8 +178,10 @@ def main():
     parser.add_argument("--output", default="change_result", help="Output directory")
     parser.add_argument("--threshold", default="0.5",
                         help="Change threshold: 'auto' or 0.0-1.0 (default: 0.5)")
-    parser.add_argument("--tile-size", type=int, default=256)
-    parser.add_argument("--overlap", type=int, default=0)
+    parser.add_argument("--tile-size", type=int, default=None,
+                        help="Tile size in pixels (default 256, or the preset's)")
+    parser.add_argument("--overlap", type=int, default=None,
+                        help="Tile overlap in pixels (default 0, or the preset's)")
     parser.add_argument("--device", default="auto")
     parser.add_argument("--grayscale", action="store_true",
                         help="Convert inputs to grayscale (for grayscale-trained models)")
@@ -140,12 +203,54 @@ def main():
                         default="exact",
                         help="Polygon simplification style (used with --output-gpkg)")
     parser.add_argument("--model-type", default=None,
-                        help="Model type: opencd, opencd_scd, or dinov2")
+                        help="Model type: opencd, opencd_scd, dinov2, ensemble "
+                             "(DINOv2 weights + Changen2 ChangeStar ViT-L, needs torchange), or "
+                             "dinov2_lc (DINOv2 change + land cover: labelled from -> to polygons)")
+    parser.add_argument("--preset", default=None, choices=sorted(PRESETS),
+                        help="Evaluated inference settings for a model (fills the options below)")
+    parser.add_argument("--scale", type=float, default=None,
+                        help="Upsample images by this factor before tiling (DINOv2 presets: 1.4)")
+    parser.add_argument("--tta", action="store_true", default=None,
+                        help="Average predictions over horizontal/vertical flips")
+    parser.add_argument("--logit-adjust", action="store_true", default=None,
+                        help="Remove the LEVIR change prior from the logits (thresholds of the presets assume it)")
+    parser.add_argument("--target-gsd", type=float, default=None,
+                        help="Resample imagery coarser than this pixel size (m) up to it; 0 = off")
+    parser.add_argument("--core-threshold", type=float, default=None,
+                        help="Speckle removal: keep a change blob only if it has a pixel at or "
+                             "above this probability (0 = off)")
+    parser.add_argument("--min-blob-m2", type=float, default=None,
+                        help="Speckle removal: drop change blobs smaller than this many m2")
+    parser.add_argument("--min-width-m", type=float, default=None,
+                        help="Speckle removal: drop blobs whose confident core is thinner than this (m)")
+    parser.add_argument("--no-cleanup", action="store_true",
+                        help="Turn the preset's speckle removal off")
+    parser.add_argument("--landcover-head", default="landcover_dinov2_vitb14_oem_second.pth",
+                        help="Land-cover head for --model-type dinov2_lc (labelled change)")
     args = parser.parse_args()
+
+    preset = PRESETS.get(args.preset, {}) if args.preset else {}
+    for key, fallback in (("scale", 1.0), ("tta", False), ("logit_adjust", False),
+                          ("target_gsd", 0.0), ("tile_size", 256), ("overlap", 0),
+                          ("core_threshold", 0.0), ("min_blob_m2", 0.0), ("min_width_m", 0.0)):
+        if getattr(args, key) is None:
+            setattr(args, key, preset.get(key, fallback))
 
     _json_progress = args.json_progress
 
-    if args.threshold == "auto":
+    # Labelled change runs the binary pipeline, then names each change blob.
+    labelled = args.model_type == "dinov2_lc"
+    if labelled:
+        args.mode = "binary"
+
+    if args.no_cleanup:
+        args.core_threshold = args.min_blob_m2 = args.min_width_m = 0.0
+
+    if args.threshold == "auto" and "threshold" in preset:
+        args.auto_threshold = False
+        args.threshold = float(preset["threshold"])
+        _log(f"Recommended threshold for this model: {args.threshold:.2f}")
+    elif args.threshold == "auto":
         args.auto_threshold = True
         args.threshold = 0.5  # placeholder, will be computed after inference
     else:
@@ -193,7 +298,7 @@ def main():
     else:
         model_type = "opencd"
 
-    if model_type == "dinov2":
+    if model_type in ("dinov2", "ensemble", "dinov2_lc"):
         patch_size = 14
         adjusted = (args.tile_size // patch_size) * patch_size
         if adjusted < patch_size:
@@ -203,8 +308,30 @@ def main():
             args.tile_size = adjusted
 
     _log("Building model...")
-    model, load_summary = build_model(weights_path, device, model_type=model_type)
+    model, load_summary = build_model(
+        weights_path, device,
+        model_type="dinov2" if model_type in ("ensemble", "dinov2_lc") else model_type)
     _log(load_summary)
+    lc_head = None
+    if labelled:
+        from uchange_qgis_plugin.landcover import load_landcover_head
+        head_path = args.landcover_head
+        if not os.path.isabs(head_path):
+            head_path = os.path.join(project_root, head_path)
+        if not os.path.isfile(head_path):
+            _emit({"type": "error", "message": f"Land-cover head not found: {head_path}"})
+            sys.exit(1)
+        lc_head = load_landcover_head(head_path, device)
+        _log(f"Land-cover head: {os.path.basename(head_path)}")
+    cs_model = None
+    if model_type == "ensemble":
+        from uchange_qgis_plugin.changestar_bridge import build_changestar
+        try:
+            cs_model, cs_summary = build_changestar(device)
+        except RuntimeError as e:
+            _emit({"type": "error", "message": str(e)})
+            sys.exit(1)
+        _log(cs_summary)
     _progress(20)
 
     _log(f"Reading before: {args.before}")
@@ -256,6 +383,22 @@ def main():
     thresh_str = "auto" if args.auto_threshold else f"{args.threshold}"
     _log(f"Tile size: {args.tile_size}, overlap: {args.overlap}, threshold: {thresh_str}")
 
+    # Resolution: the model's own scale, times an upsampling for coarse imagery.
+    from uchange_qgis_plugin.resolution import working_factor, resample_rgb, resample_prob
+    factor, gsd, gsd_note = (1.0, None, "")
+    if args.mode != "semantic":
+        factor, gsd, gsd_note = working_factor(before_geo or after_geo, args.target_gsd,
+                                               args.scale, before_img.shape)
+        if gsd:
+            _log(f"Pixel size: {gsd:.2f} m")
+        if gsd_note:
+            _log(f"  {gsd_note}")
+        if abs(factor - 1.0) > 1e-6:
+            _log(f"Inference at x{factor:.2f} ({int(w * factor)}x{int(h * factor)} px)")
+        if args.tta or args.logit_adjust:
+            _log(f"Flip averaging: {'on' if args.tta else 'off'}, "
+                 f"logit adjustment: {'on' if args.logit_adjust else 'off'}")
+
     os.makedirs(args.output, exist_ok=True)
 
     from uchange_qgis_plugin.tiling import run_tiled_inference
@@ -272,14 +415,29 @@ def main():
 
     try:
         result = run_tiled_inference(
-            model, before_img, after_img,
+            model, resample_rgb(before_img, factor), resample_rgb(after_img, factor),
             tile_size=args.tile_size,
             overlap=args.overlap,
             device=device,
             grayscale=args.grayscale,
             progress_fn=progress_fn,
             hist_match=args.histogram_match,
+            tta=args.tta,
+            logit_adjust=args.logit_adjust,
         )
+        if args.mode != "semantic":
+            result = resample_prob(result, (h, w))
+        if cs_model is not None:
+            # ChangeStar was evaluated at native scale: only the GSD correction applies.
+            from uchange_qgis_plugin.changestar_bridge import changestar_probs
+            cs_factor = factor / args.scale
+            _log("Running Changen2 ChangeStar ViT-L...")
+            p_cs = changestar_probs(cs_model, resample_rgb(before_img, cs_factor),
+                                    resample_rgb(after_img, cs_factor), device)
+            p_cs = resample_prob(p_cs, (h, w))
+            # Geometric mean: a pixel is change only if both models lean that way.
+            result = np.sqrt(np.clip(result, 0, 1) * np.clip(p_cs, 0, 1)).astype(np.float32)
+            del cs_model
     except RuntimeError as e:
         if "out of memory" in str(e).lower():
             _emit({"type": "error", "message": f"GPU out of memory. Try --tile-size 128 or --device cpu."})
@@ -288,9 +446,10 @@ def main():
     elapsed = time.time() - t0
     _log(f"Inference: {elapsed:.1f}s")
 
-    del model
-    if device.type == "cuda":
-        torch.cuda.empty_cache()
+    if not labelled:
+        del model
+        if device.type == "cuda":
+            torch.cuda.empty_cache()
 
     geo_info = before_geo or after_geo
     if not geo_info:
@@ -359,7 +518,16 @@ def main():
             args.threshold = auto_threshold(prob_map)
             _log(f"Auto threshold: {args.threshold:.6f}")
 
-        binary_mask = (prob_map > args.threshold).astype(np.uint8)
+        from uchange_qgis_plugin.cleanup import clean_mask, to_pixels
+        from uchange_qgis_plugin.resolution import pixel_size_m
+        area_px, width_px = to_pixels(gsd or pixel_size_m(before_geo or after_geo),
+                                      args.min_blob_m2, args.min_width_m)
+        binary_mask = clean_mask(prob_map, args.threshold, args.core_threshold or None,
+                                 area_px, width_px)
+        if args.core_threshold or args.min_blob_m2 or args.min_width_m:
+            raw = int((prob_map > args.threshold).sum())
+            _log(f"Speckle removal (core {args.core_threshold:.2f}, min {args.min_blob_m2:g} m2, "
+                 f"min width {args.min_width_m:g} m): {raw - int(binary_mask.sum())} pixels removed")
         n_change = int(binary_mask.sum())
         total = binary_mask.size
         _log(f"Change pixels: {n_change}/{total} ({n_change/total:.2%})")
@@ -371,7 +539,11 @@ def main():
             "threshold": args.threshold,
         }
 
-        if args.output_gpkg and geo_info:
+        if labelled:
+            result_info.update(label_changes(
+                args, model, lc_head, device, binary_mask, before_img, after_img,
+                geo_info, factor / args.scale))
+        elif args.output_gpkg and geo_info:
             _log(f"Polygonizing to {args.output_gpkg}...")
             from uchange_qgis_plugin.raster_io import polygonize_mask
 
