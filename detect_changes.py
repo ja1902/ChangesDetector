@@ -2,14 +2,16 @@
 Run change detection on your own image pair.
 
 Usage:
-    python detect_changes.py --before path/to/before.tif --after path/to/after.tif
-    python detect_changes.py --before before.png --after after.png --output my_result
-    python detect_changes.py --before before.tif --after after.tif --threshold 0.3 --tile-size 256
-    python detect_changes.py --before before.tif --after after.tif --mode semantic --weights scd_upernet_r18_10k_second.pth
+    python detect_changes.py --before before.tif --after after.tif --output-gpkg changes.gpkg
+    python detect_changes.py --before before.tif --after after.tif --mode semantic --output-gpkg labelled.gpkg
 
-Recommended (v0.7) models run with the pipeline they were evaluated with:
-    python detect_changes.py --before b.tif --after a.tif --model-type dinov2         --weights dinov2_vitb14_c2s1_levir.pth --preset synthetic --threshold auto
-    python detect_changes.py --before b.tif --after a.tif --model-type ensemble         --weights dinov2_vitb14_c2s1_levir.pth --preset ensemble --threshold auto
+Without --weights / --model-type this runs the recommended DINOv2 model with the
+pipeline it was evaluated with (--preset synthetic --threshold auto); semantic
+mode adds the land-cover head and writes from -> to polygons. Other models:
+    python detect_changes.py --before b.tif --after a.tif --model-type ensemble \
+        --weights dinov2_vitb14_c2s1_levir.pth --preset ensemble --threshold auto
+    python detect_changes.py --before b.tif --after a.tif --model-type dinov2 \
+        --weights dinov2_vitb14_levir.pth --threshold auto
 With a preset, "--threshold auto" means the model's tested threshold.
 """
 
@@ -26,7 +28,7 @@ from PIL import Image
 
 import torch
 
-from uchange_qgis_plugin.model_registry import PRESETS
+from uchange_qgis_plugin.model_registry import DEFAULT_WEIGHTS, PRESETS
 
 
 _json_progress = False
@@ -172,12 +174,13 @@ def main():
     parser.add_argument("--before", required=True, help="Path to before image")
     parser.add_argument("--after", required=True, help="Path to after image")
     parser.add_argument("--weights", default=None,
-                        help="Path to model weights (default depends on --mode)")
+                        help="Path to model weights (default: the recommended DINOv2 model)")
     parser.add_argument("--mode", choices=["binary", "semantic"], default="binary",
                         help="Detection mode: binary (default) or semantic")
     parser.add_argument("--output", default="change_result", help="Output directory")
-    parser.add_argument("--threshold", default="0.5",
-                        help="Change threshold: 'auto' or 0.0-1.0 (default: 0.5)")
+    parser.add_argument("--threshold", default=None,
+                        help="Change threshold: 'auto' or 0.0-1.0 (default: the preset's "
+                             "tested threshold, else 0.5)")
     parser.add_argument("--tile-size", type=int, default=None,
                         help="Tile size in pixels (default 256, or the preset's)")
     parser.add_argument("--overlap", type=int, default=None,
@@ -203,9 +206,10 @@ def main():
                         default="exact",
                         help="Polygon simplification style (used with --output-gpkg)")
     parser.add_argument("--model-type", default=None,
-                        help="Model type: opencd, opencd_scd, dinov2, ensemble "
+                        help="Model type (default dinov2, or dinov2_lc with --mode semantic): dinov2, ensemble "
                              "(DINOv2 weights + Changen2 ChangeStar ViT-L, needs torchange), or "
-                             "dinov2_lc (DINOv2 change + land cover: labelled from -> to polygons)")
+                             "dinov2_lc (DINOv2 change + land cover: labelled from -> to polygons); "
+                             "legacy: opencd (ChangerEx), opencd_scd (SCD UPerNet)")
     parser.add_argument("--preset", default=None, choices=sorted(PRESETS),
                         help="Evaluated inference settings for a model (fills the options below)")
     parser.add_argument("--scale", type=float, default=None,
@@ -228,6 +232,16 @@ def main():
     parser.add_argument("--landcover-head", default="landcover_dinov2_vitb14_oem_second.pth",
                         help="Land-cover head for --model-type dinov2_lc (labelled change)")
     args = parser.parse_args()
+
+    # Defaults: the recommended DINOv2 model, run the way it was tested.
+    if args.weights is None and args.model_type is None and args.preset is None:
+        args.preset = "synthetic"
+    if args.threshold is None:
+        args.threshold = "auto" if args.preset else "0.5"
+    if args.model_type is None:
+        args.model_type = "dinov2_lc" if args.mode == "semantic" else "dinov2"
+    if args.weights is None:
+        args.weights = DEFAULT_WEIGHTS
 
     preset = PRESETS.get(args.preset, {}) if args.preset else {}
     for key, fallback in (("scale", 1.0), ("tta", False), ("logit_adjust", False),
@@ -265,12 +279,6 @@ def main():
             _emit({"type": "error", "message": f"{label} not found: {path}"})
             sys.exit(1)
 
-    if args.weights is None:
-        if args.mode == "semantic":
-            args.weights = "scd_upernet_r18_10k_second.pth"
-        else:
-            args.weights = "ChangerEx_r18-512x512_40k_levircd.pth"
-
     if args.device == "auto":
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     elif args.device == "gpu":
@@ -291,12 +299,7 @@ def main():
     if not os.path.isfile(weights_path):
         _emit({"type": "error", "message": f"Model weights not found: {weights_path}"})
         sys.exit(1)
-    if args.model_type:
-        model_type = args.model_type
-    elif args.mode == "semantic":
-        model_type = "opencd_scd"
-    else:
-        model_type = "opencd"
+    model_type = args.model_type
 
     if model_type in ("dinov2", "ensemble", "dinov2_lc"):
         patch_size = 14

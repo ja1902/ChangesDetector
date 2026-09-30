@@ -125,64 +125,41 @@ pip install --no-deps arosics geoarray py_tools_ds
 echo ""
 echo "Downloading model weights..."
 
-GITHUB_RELEASE="https://github.com/ja1902/ChangesDetector/releases/download/v0.6.0"
+GITHUB_RELEASE="https://github.com/ja1902/ChangesDetector/releases/download/v0.8.0"
 
+# A failed download warns and continues: the rest of the install still runs,
+# and the file can be placed by hand afterwards.
 download_weights() {
-    local url="$1"
-    local dest="$2"
-    local name="$3"
+    local file="$1"
+    local name="$2"
+    local dest="$SCRIPT_DIR/$file"
     if [ -f "$dest" ]; then
         echo "$name weights already exist, skipping download."
         return 0
     fi
     echo "Downloading $name..."
+    local ok=0
     if command -v curl &>/dev/null; then
-        curl -L --fail --progress-bar -o "$dest" "$url"
+        curl -L --fail --progress-bar -o "$dest" "$GITHUB_RELEASE/$file" && ok=1
     elif command -v wget &>/dev/null; then
-        wget --show-progress -O "$dest" "$url"
+        wget --show-progress -O "$dest" "$GITHUB_RELEASE/$file" && ok=1
     else
         echo "ERROR: Neither curl nor wget found. Please install one."
-        return 1
     fi
-    if [ $? -ne 0 ]; then
+    if [ "$ok" -ne 1 ]; then
         rm -f "$dest"
-        echo "WARNING: Download failed. Please download manually and place at:"
+        echo "WARNING: Download failed. Please download $file from"
+        echo "         https://github.com/ja1902/ChangesDetector/releases and place it at:"
         echo "         $dest"
     fi
+    return 0
 }
 
-# v0.7+ recommended model (DINOv2 decoder trained on Changen2 synthetic data + LEVIR-CD)
-# and the v0.8 land-cover head for labelled change (OpenEarthMap + SECOND).
-# Research / non-commercial use (CC BY-NC-SA 4.0 training data).
-download_weights \
-    "https://github.com/ja1902/ChangesDetector/releases/download/v0.8.0/dinov2_vitb14_c2s1_levir.pth" \
-    "$SCRIPT_DIR/dinov2_vitb14_c2s1_levir.pth" \
-    "DINOv2 ViT-B/14 + synthetic data (recommended)"
-
-download_weights \
-    "https://github.com/ja1902/ChangesDetector/releases/download/v0.8.0/landcover_dinov2_vitb14_oem_second.pth" \
-    "$SCRIPT_DIR/landcover_dinov2_vitb14_oem_second.pth" \
-    "DINOv2 land-cover head (labelled change)"
-
-download_weights \
-    "$GITHUB_RELEASE/dinov2_vitb14_levir.pth" \
-    "$SCRIPT_DIR/dinov2_vitb14_levir.pth" \
-    "DINOv2 ViT-B/14 (generalizable)"
-
-download_weights \
-    "$GITHUB_RELEASE/dinov2_vitb14_egybcd.pth" \
-    "$SCRIPT_DIR/dinov2_vitb14_egybcd.pth" \
-    "DINOv2 ViT-B/14 (fine-tuned)"
-
-download_weights \
-    "$GITHUB_RELEASE/ChangerEx_r18-512x512_40k_levircd.pth" \
-    "$SCRIPT_DIR/ChangerEx_r18-512x512_40k_levircd.pth" \
-    "ChangerEx R18 (LEVIR-CD)"
-
-download_weights \
-    "$GITHUB_RELEASE/scd_upernet_r18_10k_second.pth" \
-    "$SCRIPT_DIR/scd_upernet_r18_10k_second.pth" \
-    "SCD UPerNet R18 (SECOND)"
+# Model weights are for research / non-commercial use (CC BY-NC-SA 4.0 training data).
+download_weights dinov2_vitb14_c2s1_levir.pth "DINOv2 ViT-B/14 + synthetic data (recommended)"
+download_weights landcover_dinov2_vitb14_oem_second.pth "DINOv2 land-cover head (labelled change)"
+download_weights dinov2_vitb14_levir.pth "DINOv2 ViT-B/14 (generalizable)"
+download_weights dinov2_vitb14_egybcd.pth "DINOv2 ViT-B/14 (fine-tuned)"
 
 # -----------------------------------------------
 # 6. Write environment config for plugin
@@ -205,8 +182,12 @@ QGIS_PLUGINS="$HOME/.local/share/QGIS/QGIS3/profiles/default/python/plugins"
 mkdir -p "$QGIS_PLUGINS"
 
 PLUGIN_LINK="$QGIS_PLUGINS/uchange_qgis_plugin"
-if [ -L "$PLUGIN_LINK" ] || [ -d "$PLUGIN_LINK" ]; then
+if [ -L "$PLUGIN_LINK" ]; then
     rm -f "$PLUGIN_LINK"
+elif [ -d "$PLUGIN_LINK" ]; then
+    # an earlier copied (not linked) install: keep it aside rather than delete it
+    mv "$PLUGIN_LINK" "$PLUGIN_LINK.old.$(date +%Y%m%d%H%M%S)"
+    echo "Moved an earlier plugin copy aside: $PLUGIN_LINK.old.*"
 fi
 ln -s "$SCRIPT_DIR/uchange_qgis_plugin" "$PLUGIN_LINK"
 echo "Plugin symlinked to: $PLUGIN_LINK"

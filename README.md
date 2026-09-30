@@ -17,9 +17,15 @@ Share of truly changed pixels whose before *and* after class are right:
 
 Changes are found by the building-focused v0.7 model, so this mode suits building and urban change: on the French data it found changes far better than the UPerNet (IoU 0.22 vs 0.05). Changes that involve no building, such as forest cleared for farmland, are largely missed. Needs `landcover_dinov2_vitb14_oem_second.pth` (the installer downloads it). CLI: `--model-type dinov2_lc --preset synthetic --threshold auto --output-gpkg out.gpkg`.
 
+### Models dropped
+
+ChangerEx (R18) and the SCD UPerNet (R18) are no longer installed or listed: the DINOv2 models beat ChangerEx on every unseen dataset tested, and the new labelled-change mode replaces the SCD UPerNet for building and urban change. Their weights stay on the [v0.6.0 release](https://github.com/ja1902/ChangesDetector/releases/tag/v0.6.0), and the CLI still runs them with `--model-type opencd` / `--model-type opencd_scd --mode semantic`. All v0.8 weights are on the single v0.8.0 release.
+
 ### Fixes
 
 - **CPU**: DINOv2 models crashed on computers without an NVIDIA GPU (float16 weights, float32 inputs); they now run in float32 on CPU.
+- **Installer**: a failed weight download no longer stops the installer.
+- **CLI defaults**: with no model given, `detect_changes.py` now runs the recommended DINOv2 model with its tested settings (it used to default to ChangerEx).
 
 ## What changed (v0.7)
 
@@ -213,8 +219,6 @@ A central finding is that most change detection models are **domain-locked** -- 
 | **DINOv2 ViT-B + land cover, from -> to (recommended)** | as above + OpenEarthMap + SECOND | Same backbone + land-cover head | Labelled CD |
 | DINOv2 ViT-B/14 (generalizable) | LEVIR-CD | Frozen ViT-B/14 + FPN decoder | Binary CD |
 | DINOv2 ViT-B/14 (fine-tuned) | LEVIR-CD + domain data | Frozen ViT-B/14 + FPN decoder | Binary CD |
-| ChangerEx (R18) | LEVIR-CD | ResNet-18 + FDAF | Binary CD |
-| SCD UPerNet (R18) | SECOND | UPerNet + ResNet-18 | Semantic CD |
 
 ### Prerequisites
 
@@ -260,42 +264,34 @@ The installer will:
 6. Choose detection mode: **Binary Change Detection** or **Semantic Change Detection**
 7. Select device: **Auto**, **CPU**, or **GPU**
 8. Set processing parameters (tile size, overlap, threshold for binary mode)
-9. Choose an output path (GeoPackage for binary, GeoTIFF for semantic)
+9. Choose an output GeoPackage (semantic mode also saves before/after land-cover rasters next to it)
 10. Click **Run**
 
 ### Manual Weight Download
 
-If the installer cannot download weights automatically, download them from the [GitHub Releases page](https://github.com/ja1902/ChangesDetector/releases) and place in the project root:
+If the installer cannot download weights automatically, download them from the [v0.8.0 release](https://github.com/ja1902/ChangesDetector/releases/tag/v0.8.0) and place them in the project root:
 
-- `dinov2_vitb14_levir.pth` (364MB) -- DINOv2 ViT-B/14 generalizable binary CD
-- `dinov2_vitb14_egybcd.pth` (365MB) -- DINOv2 ViT-B/14 fine-tuned binary CD
-- `ChangerEx_r18-512x512_40k_levircd.pth` -- ChangerEx binary CD
-- `scd_upernet_r18_10k_second.pth` -- SCD semantic CD
+- `dinov2_vitb14_c2s1_levir.pth` (382 MB) -- DINOv2 + synthetic data, the recommended binary model (also finds the changes in semantic mode)
+- `landcover_dinov2_vitb14_oem_second.pth` (14 MB) -- land-cover head for labelled (from -> to) change
+- `dinov2_vitb14_levir.pth` (382 MB) -- DINOv2 generalizable (v0.6)
+- `dinov2_vitb14_egybcd.pth` (382 MB) -- DINOv2 fine-tuned (v0.6)
+
+Model weights are for research / non-commercial use.
 
 ### Standalone CLI
 
 ```bash
-# Binary change detection with DINOv2 (auto threshold)
-python detect_changes.py --before path/to/before.tif --after path/to/after.tif \
-    --model-type dinov2 --weights dinov2_vitb14_levir.pth --threshold auto
+# Binary change detection: recommended DINOv2 model, tested settings, polygons
+python detect_changes.py --before before.tif --after after.tif --output-gpkg changes.gpkg
 
-# With histogram matching (for mismatched image pairs)
-python detect_changes.py --before path/to/before.tif --after path/to/after.tif \
-    --model-type dinov2 --weights dinov2_vitb14_levir.pth --threshold auto --histogram-match
+# Labelled change: polygons with from_class / to_class / change / area
+python detect_changes.py --before before.tif --after after.tif --mode semantic     --output-gpkg labelled.gpkg --min-area 20
 
-# Binary change detection with ChangerEx
-python detect_changes.py --before path/to/before.tif --after path/to/after.tif
-
-# Semantic change detection
-python detect_changes.py --before path/to/before.tif --after path/to/after.tif --mode semantic
-
-# Output as GeoPackage polygons
-python detect_changes.py --before path/to/before.tif --after path/to/after.tif \
-    --model-type dinov2 --weights dinov2_vitb14_levir.pth \
-    --threshold auto --output-gpkg changes.gpkg --min-area 100
+# Another model, e.g. the v0.6 DINOv2 model with a per-scene threshold
+python detect_changes.py --before before.tif --after after.tif     --model-type dinov2 --weights dinov2_vitb14_levir.pth --threshold auto --output-gpkg changes.gpkg
 ```
 
-Options: `--mode binary|semantic`, `--model-type opencd|dinov2`, `--threshold auto|0.3`, `--histogram-match`, `--overlap 32`, `--tile-size 256`, `--weights path/to/weights.pth`, `--no-coreg`, `--max-shift 50`, `--coreg-window 1024`
+Options: `--mode binary|semantic`, `--model-type dinov2|ensemble|dinov2_lc`, `--weights path/to/weights.pth`, `--preset synthetic|ensemble`, `--threshold auto|0.3`, `--target-gsd 0.5`, `--min-area 20`, `--histogram-match`, `--tile-size 252`, `--overlap 64`, `--no-coreg`, `--max-shift 50`, `--coreg-window 1024`, `--device auto|cpu|gpu`
 
 ### Training
 

@@ -72,34 +72,32 @@ pip install arosics geoarray py_tools_ds shapely scikit-image
 echo.
 echo Downloading model weights...
 
-set "GITHUB_RELEASE=https://github.com/ja1902/ChangesDetector/releases/download/v0.6.0"
+set "GITHUB_RELEASE=https://github.com/ja1902/ChangesDetector/releases/download/v0.8.0"
 
-:: v0.7 recommended model (DINOv2 decoder trained on Changen2 synthetic data + LEVIR-CD).
-:: Its training data is CC BY-NC-SA 4.0: research / non-commercial use.
+:: Model weights are for research / non-commercial use (CC BY-NC-SA 4.0 training data).
 set "SYNTH_WEIGHTS=%SCRIPT_DIR%\dinov2_vitb14_c2s1_levir.pth"
 if exist "%SYNTH_WEIGHTS%" (
     echo DINOv2 synthetic-data weights already exist, skipping download.
 ) else (
     echo Downloading DINOv2 ViT-B/14 + synthetic data [recommended]...
-    curl -L --fail --progress-bar -o "%SYNTH_WEIGHTS%" "https://github.com/ja1902/ChangesDetector/releases/download/v0.8.0/dinov2_vitb14_c2s1_levir.pth"
+    curl -L --fail --progress-bar -o "%SYNTH_WEIGHTS%" "%GITHUB_RELEASE%/dinov2_vitb14_c2s1_levir.pth"
     if !errorlevel! neq 0 (
         del "%SYNTH_WEIGHTS%" 2>nul
-        echo WARNING: Download failed. Please download manually.
-        echo          Place the file at: %SYNTH_WEIGHTS%
+        echo WARNING: Download failed. Please download dinov2_vitb14_c2s1_levir.pth from
+        echo          https://github.com/ja1902/ChangesDetector/releases and place it at: %SYNTH_WEIGHTS%
     )
 )
 
-:: v0.8 land-cover head for labelled (from -> to) change.
 set "LC_HEAD=%SCRIPT_DIR%\landcover_dinov2_vitb14_oem_second.pth"
 if exist "%LC_HEAD%" (
-    echo Land-cover head already exists, skipping download.
+    echo Land-cover head weights already exist, skipping download.
 ) else (
     echo Downloading DINOv2 land-cover head [labelled change]...
-    curl -L --fail --progress-bar -o "%LC_HEAD%" "https://github.com/ja1902/ChangesDetector/releases/download/v0.8.0/landcover_dinov2_vitb14_oem_second.pth"
+    curl -L --fail --progress-bar -o "%LC_HEAD%" "%GITHUB_RELEASE%/landcover_dinov2_vitb14_oem_second.pth"
     if !errorlevel! neq 0 (
         del "%LC_HEAD%" 2>nul
-        echo WARNING: Download failed. Please download manually.
-        echo          Place the file at: %LC_HEAD%
+        echo WARNING: Download failed. Please download landcover_dinov2_vitb14_oem_second.pth from
+        echo          https://github.com/ja1902/ChangesDetector/releases and place it at: %LC_HEAD%
     )
 )
 
@@ -111,8 +109,8 @@ if exist "%LEVIR_WEIGHTS%" (
     curl -L --fail --progress-bar -o "%LEVIR_WEIGHTS%" "%GITHUB_RELEASE%/dinov2_vitb14_levir.pth"
     if !errorlevel! neq 0 (
         del "%LEVIR_WEIGHTS%" 2>nul
-        echo WARNING: Download failed. Please download manually.
-        echo          Place the file at: %LEVIR_WEIGHTS%
+        echo WARNING: Download failed. Please download dinov2_vitb14_levir.pth from
+        echo          https://github.com/ja1902/ChangesDetector/releases and place it at: %LEVIR_WEIGHTS%
     )
 )
 
@@ -124,34 +122,8 @@ if exist "%DINOV2_WEIGHTS%" (
     curl -L --fail --progress-bar -o "%DINOV2_WEIGHTS%" "%GITHUB_RELEASE%/dinov2_vitb14_egybcd.pth"
     if !errorlevel! neq 0 (
         del "%DINOV2_WEIGHTS%" 2>nul
-        echo WARNING: Download failed. Please download manually.
-        echo          Place the file at: %DINOV2_WEIGHTS%
-    )
-)
-
-set "CHANGEREX_WEIGHTS=%SCRIPT_DIR%\ChangerEx_r18-512x512_40k_levircd.pth"
-if exist "%CHANGEREX_WEIGHTS%" (
-    echo ChangerEx weights already exist, skipping download.
-) else (
-    echo Downloading ChangerEx R18 [LEVIR-CD]...
-    curl -L --fail --progress-bar -o "%CHANGEREX_WEIGHTS%" "%GITHUB_RELEASE%/ChangerEx_r18-512x512_40k_levircd.pth"
-    if !errorlevel! neq 0 (
-        del "%CHANGEREX_WEIGHTS%" 2>nul
-        echo WARNING: Download failed. Please download manually.
-        echo          Place the file at: %CHANGEREX_WEIGHTS%
-    )
-)
-
-set "SCD_WEIGHTS=%SCRIPT_DIR%\scd_upernet_r18_10k_second.pth"
-if exist "%SCD_WEIGHTS%" (
-    echo SCD UPerNet weights already exist, skipping download.
-) else (
-    echo Downloading SCD UPerNet R18 [SECOND]...
-    curl -L --fail --progress-bar -o "%SCD_WEIGHTS%" "%GITHUB_RELEASE%/scd_upernet_r18_10k_second.pth"
-    if !errorlevel! neq 0 (
-        del "%SCD_WEIGHTS%" 2>nul
-        echo WARNING: Download failed. Please download manually.
-        echo          Place the file at: %SCD_WEIGHTS%
+        echo WARNING: Download failed. Please download dinov2_vitb14_egybcd.pth from
+        echo          https://github.com/ja1902/ChangesDetector/releases and place it at: %DINOV2_WEIGHTS%
     )
 )
 
