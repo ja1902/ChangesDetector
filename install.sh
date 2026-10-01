@@ -190,15 +190,12 @@ download_weights landcover_dinov2_vitb14_oem_second.pth "DINOv2 land-cover head 
 download_weights dinov2_vitb14_levir.pth "DINOv2 ViT-B/14 (generalizable)"
 download_weights dinov2_vitb14_egybcd.pth "DINOv2 ViT-B/14 (fine-tuned)"
 
-# Optional: the "Changen2 ViT-L + DINOv2" model needs torchange (about 1 GB of
-# extra packages; its weights, fetched on first use, are CC BY-NC-SA 4.0).
-# Non-interactive installs: INSTALL_CHANGEN2=1 ./install.sh
+# The "Changen2 ViT-L + DINOv2" model needs torchange (about 1 GB of extra
+# packages plus ~1.2 GB of weights, CC BY-NC-SA 4.0). Installed by default;
+# skip it with: INSTALL_CHANGEN2=0 ./install.sh
 echo ""
-answer="${INSTALL_CHANGEN2:-}"
-if [ -z "$answer" ]; then
-    read -rp "Install optional Changen2 model support (research use, ~1 GB)? [y/N] " answer || answer=""
-fi
-if [[ "$answer" =~ ^([Yy]|1)$ ]]; then
+if [[ ! "${INSTALL_CHANGEN2:-1}" =~ ^(0|[Nn]|no|false)$ ]]; then
+    echo "Installing Changen2 model support (research use, ~2 GB)..."
     pip install --no-deps torchange ever-beta
     pip install einops timm albumentations tifffile tqdm wandb prettytable tensorboard matplotlib datasets huggingface_hub
     # same import as the plugin (includes its Python 3.10 compatibility step)
@@ -206,12 +203,20 @@ if [[ "$answer" =~ ^([Yy]|1)$ ]]; then
     CHECK_CHANGEN2="import importlib.util as u; s = u.spec_from_file_location('changestar_bridge', '$SCRIPT_DIR/uchange_qgis_plugin/changestar_bridge.py'); m = u.module_from_spec(s); s.loader.exec_module(m); m.import_changen2()"
     if python -c "$CHECK_CHANGEN2" 2>/dev/null; then
         echo "Changen2 support: OK"
+        # fetch the weights now, from huggingface.co, so the plugin never has to download at run time
+        echo "Downloading Changen2 weights (~1.2 GB) from huggingface.co..."
+        if python -c "import importlib.util as u; s = u.spec_from_file_location('changestar_bridge', '$SCRIPT_DIR/uchange_qgis_plugin/changestar_bridge.py'); m = u.module_from_spec(s); s.loader.exec_module(m); m._ensure_strenum(); print(m.prefetch_weights())"; then
+            echo "Changen2 weights: OK"
+        else
+            echo "WARNING: Changen2 weights could not be downloaded (is huggingface.co reachable? a proxy or"
+            echo "         firewall may block it). Re-run the installer once it is, or the plugin will retry on first use."
+        fi
     else
         echo "WARNING: torchange does not import:"
         { python -c "$CHECK_CHANGEN2" 2>&1 || true; } | tail -1 | sed 's/^/         /'
     fi
 else
-    echo "Skipped. The Changen2 model will show install instructions if selected."
+    echo "Skipped Changen2 (INSTALL_CHANGEN2=0). The Changen2 model will show install instructions if selected."
 fi
 
 # -----------------------------------------------

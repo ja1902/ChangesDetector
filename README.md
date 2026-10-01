@@ -24,7 +24,7 @@ ChangerEx (R18) and the SCD UPerNet (R18) are no longer installed or listed: the
 ### Fixes
 
 - **CPU**: DINOv2 models crashed on computers without an NVIDIA GPU (float16 weights, float32 inputs); they now run in float32 on CPU.
-- **Installer**: a failed weight download no longer stops the installer. It now checks GDAL's NumPy support after building the bindings, and offers optional Changen2 support (`INSTALL_CHANGEN2=1 ./install.sh` for unattended installs).
+- **Installer**: a failed weight download no longer stops the installer. It now checks GDAL's NumPy support after building the bindings, and installs Changen2 support and its weights by default (`INSTALL_CHANGEN2=0 ./install.sh` skips it).
 - **GeoTIFFs on some Linux installs**: when GDAL's Python bindings were built without NumPy support (`No module named '_gdal_array'`), GeoTIFFs were silently read without georeferencing and writing polygons failed. Rasters are now read and written without that module, and a failed GDAL read is reported instead of hidden.
 - **CLI defaults**: with no model given, `detect_changes.py` now runs the recommended DINOv2 model with its tested settings (it used to default to ChangerEx).
 
@@ -54,7 +54,7 @@ Every model collapses on imagery much coarser than it was trained on (2 m LEVIR:
 
 ### Optional: Changen2 ViT-L + DINOv2 (most accurate)
 
-Runs the Changen2 ChangeStar ViT-L model alongside the DINOv2 model and keeps only change both agree on. It needs the optional `torchange` package (the plugin prints install instructions) and is slower; ChangeStar weights are CC BY-NC-SA 4.0.
+Runs the Changen2 ChangeStar ViT-L model alongside the DINOv2 model and keeps only change both agree on. The installer sets up the `torchange` package and downloads the weights from huggingface.co by default (`INSTALL_CHANGEN2=0` skips this, and the plugin then prints install instructions). It is slower; ChangeStar weights are CC BY-NC-SA 4.0.
 
 ### Fixes
 

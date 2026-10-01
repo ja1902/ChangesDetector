@@ -58,12 +58,42 @@ def import_changen2():
     return c2
 
 
+HF_REPO = "EVER-Z/Changen2-ChangeStar1x256"
+_WEIGHT_KEY = "s1_changestar_vitl_1x256"
+
+OFFLINE_HINT = (
+    "The Changen2 weights (%s on Hugging Face, ~1.2 GB) are not in this computer's cache "
+    "and could not be downloaded.\n"
+    "Either connect to the internet and run the model once, or run install.sh on a connected "
+    "machine (it downloads them) and copy that machine's ~/.cache/huggingface folder here.\n"
+    "Without them, use the 'DINOv2 ViT-B + synthetic data' model, which needs no download."
+    % HF_REPO)
+
+
+def prefetch_weights():
+    """Download the Changen2 weights into the Hugging Face cache (needs internet).
+
+    torchange fetches them on first use; running this at install time means the
+    model also works later on a computer without internet access.
+    """
+    import json
+    from huggingface_hub import hf_hub_download
+    cfg = json.load(open(hf_hub_download(HF_REPO, "config.json"), encoding="utf-8"))
+    return hf_hub_download(HF_REPO, cfg[_WEIGHT_KEY])
+
+
 def build_changestar(device):
     try:
         c2 = import_changen2()
     except ImportError as exc:
         raise RuntimeError(import_error_message(exc)) from exc
-    model = c2.s1_init_s1c1_changestar_vitl_1x256().to(device).eval()
+    try:
+        model = c2.s1_init_s1c1_changestar_vitl_1x256().to(device).eval()
+    except Exception as exc:
+        # no internet and nothing cached: huggingface_hub raises its own error types
+        if type(exc).__module__.startswith("huggingface_hub") or isinstance(exc, (OSError, ConnectionError)):
+            raise RuntimeError("%s: %s\n%s" % (type(exc).__name__, exc, OFFLINE_HINT)) from exc
+        raise
     for p in model.parameters():
         p.requires_grad = False
     return model, "Model: Changen2 ChangeStar ViT-L (EVER-Z/Changen2-ChangeStar1x256, CC BY-NC-SA 4.0)"
@@ -109,3 +139,8 @@ def changestar_probs(model, pre_img, post_img, device, window=1024, overlap=128,
         if progress_fn:
             progress_fn(i + 1, len(coords))
     return acc / np.maximum(cnt, 1.0)
+
+
+if __name__ == "__main__":
+    _ensure_strenum()
+    print("Downloaded:", prefetch_weights())
