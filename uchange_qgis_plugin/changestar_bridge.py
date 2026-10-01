@@ -14,16 +14,34 @@ INSTALL_HINT = (
     "The 'Changen2 ViT-L + DINOv2' model needs the optional torchange package.\n"
     "Install it into the plugin's virtual environment:\n"
     "  pip install --no-deps torchange ever-beta\n"
-    "  pip install albumentations tifffile tqdm wandb prettytable tensorboard matplotlib datasets huggingface_hub\n"
+    "  pip install einops timm albumentations tifffile tqdm wandb prettytable tensorboard matplotlib datasets huggingface_hub\n"
     "Its weights are licensed CC BY-NC-SA 4.0 (non-commercial use only)."
 )
+
+
+# import name -> pip package, for the "missing package" message
+_PIP_NAMES = {"cv2": "opencv-python-headless", "skimage": "scikit-image", "PIL": "pillow",
+              "sklearn": "scikit-learn", "yaml": "pyyaml",
+              "segmentation_models_pytorch": "segmentation-models-pytorch"}
+
+
+def import_error_message(exc):
+    """Say what is actually missing: torchange itself, or one of its dependencies."""
+    missing = (getattr(exc, "name", None) or "").split(".")[0]
+    if missing == "torchange" or not missing:
+        return INSTALL_HINT if missing else (
+            "torchange is installed but could not be imported: %s: %s\n%s"
+            % (type(exc).__name__, exc, INSTALL_HINT))
+    return ("torchange is installed, but it needs '%s', which is missing.\n"
+            "Install it into the plugin's virtual environment:\n  pip install %s"
+            % (missing, _PIP_NAMES.get(missing, missing)))
 
 
 def build_changestar(device):
     try:
         import torchange.models.changen2 as c2
     except ImportError as exc:
-        raise RuntimeError(INSTALL_HINT) from exc
+        raise RuntimeError(import_error_message(exc)) from exc
     model = c2.s1_init_s1c1_changestar_vitl_1x256().to(device).eval()
     for p in model.parameters():
         p.requires_grad = False

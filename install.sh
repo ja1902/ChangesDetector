@@ -138,7 +138,7 @@ if python -c "from osgeo import gdal_array" 2>/dev/null; then
     echo "GDAL NumPy support: OK"
 else
     echo "WARNING: GDAL's NumPy support (osgeo.gdal_array) does not load:"
-    python -c "import osgeo._gdal_array" 2>&1 | tail -1 | sed 's/^/         /'
+    { python -c "import osgeo._gdal_array" 2>&1 || true; } | tail -1 | sed 's/^/         /'
     echo "         Change detection works, but automatic co-registration will be skipped."
 fi
 
@@ -200,7 +200,13 @@ if [ -z "$answer" ]; then
 fi
 if [[ "$answer" =~ ^([Yy]|1)$ ]]; then
     pip install --no-deps torchange ever-beta
-    pip install albumentations tifffile tqdm wandb prettytable tensorboard matplotlib datasets huggingface_hub
+    pip install einops timm albumentations tifffile tqdm wandb prettytable tensorboard matplotlib datasets huggingface_hub
+    if python -c "import torchange.models.changen2" 2>/dev/null; then
+        echo "Changen2 support: OK"
+    else
+        echo "WARNING: torchange does not import:"
+        { python -c "import torchange.models.changen2" 2>&1 || true; } | tail -1 | sed 's/^/         /'
+    fi
 else
     echo "Skipped. The Changen2 model will show install instructions if selected."
 fi
