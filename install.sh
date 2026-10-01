@@ -201,11 +201,14 @@ fi
 if [[ "$answer" =~ ^([Yy]|1)$ ]]; then
     pip install --no-deps torchange ever-beta
     pip install einops timm albumentations tifffile tqdm wandb prettytable tensorboard matplotlib datasets huggingface_hub
-    if python -c "import torchange.models.changen2" 2>/dev/null; then
+    # same import as the plugin (includes its Python 3.10 compatibility step)
+    # (loads only the bridge file, so a GDAL problem cannot mask the result)
+    CHECK_CHANGEN2="import importlib.util as u; s = u.spec_from_file_location('changestar_bridge', '$SCRIPT_DIR/uchange_qgis_plugin/changestar_bridge.py'); m = u.module_from_spec(s); s.loader.exec_module(m); m.import_changen2()"
+    if python -c "$CHECK_CHANGEN2" 2>/dev/null; then
         echo "Changen2 support: OK"
     else
         echo "WARNING: torchange does not import:"
-        { python -c "import torchange.models.changen2" 2>&1 || true; } | tail -1 | sed 's/^/         /'
+        { python -c "$CHECK_CHANGEN2" 2>&1 || true; } | tail -1 | sed 's/^/         /'
     fi
 else
     echo "Skipped. The Changen2 model will show install instructions if selected."

@@ -37,9 +37,30 @@ def import_error_message(exc):
             % (missing, _PIP_NAMES.get(missing, missing)))
 
 
+def _ensure_strenum():
+    """enum.StrEnum is new in Python 3.11; add a stand-in on 3.10."""
+    import enum
+    if not hasattr(enum, "StrEnum"):
+        class StrEnum(str, enum.Enum):
+            def __str__(self):
+                return str(self.value)
+        enum.StrEnum = StrEnum
+
+
+def import_changen2():
+    """Import torchange's Changen2 models, also on Python 3.10.
+
+    torchange imports every one of its dataset modules on import, and one of
+    them (BRIGHT, unused here) needs enum.StrEnum. Ubuntu 22.04 ships 3.10.
+    """
+    _ensure_strenum()
+    import torchange.models.changen2 as c2
+    return c2
+
+
 def build_changestar(device):
     try:
-        import torchange.models.changen2 as c2
+        c2 = import_changen2()
     except ImportError as exc:
         raise RuntimeError(import_error_message(exc)) from exc
     model = c2.s1_init_s1c1_changestar_vitl_1x256().to(device).eval()
