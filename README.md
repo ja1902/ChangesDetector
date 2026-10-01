@@ -24,7 +24,8 @@ ChangerEx (R18) and the SCD UPerNet (R18) are no longer installed or listed: the
 ### Fixes
 
 - **CPU**: DINOv2 models crashed on computers without an NVIDIA GPU (float16 weights, float32 inputs); they now run in float32 on CPU.
-- **Installer**: a failed weight download no longer stops the installer.
+- **Installer**: a failed weight download no longer stops the installer. It now checks GDAL's NumPy support after building the bindings, and offers optional Changen2 support (`INSTALL_CHANGEN2=1 ./install.sh` for unattended installs).
+- **GeoTIFFs on some Linux installs**: when GDAL's Python bindings were built without NumPy support (`No module named '_gdal_array'`), GeoTIFFs were silently read without georeferencing and writing polygons failed. Rasters are now read and written without that module, and a failed GDAL read is reported instead of hidden.
 - **CLI defaults**: with no model given, `detect_changes.py` now runs the recommended DINOv2 model with its tested settings (it used to default to ChangerEx).
 
 ## What changed (v0.7)

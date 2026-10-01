@@ -4,6 +4,36 @@ from osgeo import gdal, ogr, osr
 
 gdal.UseExceptions()
 
+# Band I/O through raw buffers instead of ReadAsArray / WriteArray: those need
+# GDAL's optional NumPy module (osgeo._gdal_array), which is missing when the
+# bindings were built without NumPy, and then every GeoTIFF read and polygon
+# write fails.
+_GDAL_TO_NUMPY = {
+    gdal.GDT_Byte: np.uint8, gdal.GDT_UInt16: np.uint16, gdal.GDT_Int16: np.int16,
+    gdal.GDT_UInt32: np.uint32, gdal.GDT_Int32: np.int32,
+    gdal.GDT_Float32: np.float32, gdal.GDT_Float64: np.float64,
+}
+_NUMPY_TO_GDAL = {np.dtype(v): k for k, v in _GDAL_TO_NUMPY.items()}
+
+
+def read_band(band):
+    """GDAL band -> 2D numpy array (no osgeo.gdal_array needed)."""
+    dt = band.DataType if band.DataType in _GDAL_TO_NUMPY else gdal.GDT_Float64
+    w, h = band.XSize, band.YSize
+    buf = band.ReadRaster(0, 0, w, h, buf_type=dt)
+    return np.frombuffer(buf, dtype=_GDAL_TO_NUMPY[dt]).reshape(h, w)
+
+
+def write_band(band, array):
+    """2D numpy array -> GDAL band (no osgeo.gdal_array needed)."""
+    arr = np.ascontiguousarray(array)
+    if arr.dtype == np.bool_:
+        arr = arr.astype(np.uint8)
+    if arr.dtype not in _NUMPY_TO_GDAL:
+        arr = arr.astype(np.float64)
+    h, w = arr.shape
+    band.WriteRaster(0, 0, w, h, arr.tobytes(), w, h, _NUMPY_TO_GDAL[arr.dtype])
+
 
 def read_raster(source_path):
     """Read a raster file and return image data with georeferencing info.
@@ -25,7 +55,7 @@ def read_raster(source_path):
 
     bands = []
     for i in range(1, 4):
-        band = ds.GetRasterBand(i).ReadAsArray()
+        band = read_band(ds.GetRasterBand(i))
         bands.append(band)
 
     image = np.stack(bands, axis=-1)
@@ -107,7 +137,7 @@ def save_semantic_geotiff(class_map, geotransform, projection_wkt, output_path,
     band.SetColorInterpretation(gdal.GCI_PaletteIndex)
     band.SetNoDataValue(0)
 
-    band.WriteArray(class_map)
+    write_band(band, class_map.astype(np.uint8))
     band.SetCategoryNames(list(class_names))
     band.FlushCache()
     ds.FlushCache()
@@ -126,7 +156,7 @@ def save_binary_geotiff(binary_mask, geotransform, projection_wkt, output_path):
 
     band = ds.GetRasterBand(1)
     band.SetNoDataValue(0)
-    band.WriteArray(binary_mask * 255)
+    write_band(band, (binary_mask * 255).astype(np.uint8))
     band.FlushCache()
     ds.FlushCache()
     ds = None
@@ -179,7 +209,7 @@ def polygonize_mask(binary_mask, geotransform, projection_wkt, output_path,
     mem_ds.SetGeoTransform(geotransform)
     mem_ds.SetProjection(projection_wkt)
     mem_band = mem_ds.GetRasterBand(1)
-    mem_band.WriteArray(binary_mask)
+    write_band(mem_band, binary_mask.astype(np.uint8))
     mem_band.FlushCache()
 
     gpkg_driver = ogr.GetDriverByName("GPKG")
@@ -243,7 +273,7 @@ def polygonize_labelled_changes(blobs, from_cls, to_cls, class_names, geotransfo
     mem_ds.SetGeoTransform(geotransform)
     mem_ds.SetProjection(projection_wkt)
     mem_band = mem_ds.GetRasterBand(1)
-    mem_band.WriteArray(blobs)
+    write_band(mem_band, blobs.astype(np.int32))
     mem_band.FlushCache()
 
     out_ds = ogr.GetDriverByName("GPKG").CreateDataSource(output_path)

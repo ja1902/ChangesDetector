@@ -113,6 +113,20 @@ pip install -r "$SCRIPT_DIR/requirements.txt"
 echo "Installing GDAL Python bindings (v$GDAL_VERSION)..."
 pip install --no-cache-dir --no-binary GDAL --no-build-isolation "GDAL==$GDAL_VERSION"
 
+# GDAL < 3.9 silently builds its bindings without NumPy support if NumPy cannot
+# be imported during the build. The plugin works without it (it reads and
+# writes rasters through plain buffers), but co-registration (AROSICS) needs it.
+if ! python -c "from osgeo import gdal_array" 2>/dev/null; then
+    echo "GDAL bindings were built without NumPy support; rebuilding once..."
+    pip install --force-reinstall --no-deps --no-cache-dir --no-binary GDAL         --no-build-isolation -v "GDAL==$GDAL_VERSION" 2>&1 | grep -iE "numpy|array support" || true
+fi
+if python -c "from osgeo import gdal_array" 2>/dev/null; then
+    echo "GDAL NumPy support: OK"
+else
+    echo "WARNING: GDAL's NumPy support (osgeo.gdal_array) is still missing."
+    echo "         Change detection works, but automatic co-registration will be skipped."
+fi
+
 # arosics/geoarray/py_tools_ds officially require GDAL >= 3.8, but work
 # with older versions via our compatibility shims in _gdal_compat.py.
 # Install without deps to avoid pip pulling an incompatible GDAL version.
@@ -160,6 +174,21 @@ download_weights dinov2_vitb14_c2s1_levir.pth "DINOv2 ViT-B/14 + synthetic data 
 download_weights landcover_dinov2_vitb14_oem_second.pth "DINOv2 land-cover head (labelled change)"
 download_weights dinov2_vitb14_levir.pth "DINOv2 ViT-B/14 (generalizable)"
 download_weights dinov2_vitb14_egybcd.pth "DINOv2 ViT-B/14 (fine-tuned)"
+
+# Optional: the "Changen2 ViT-L + DINOv2" model needs torchange (about 1 GB of
+# extra packages; its weights, fetched on first use, are CC BY-NC-SA 4.0).
+# Non-interactive installs: INSTALL_CHANGEN2=1 ./install.sh
+echo ""
+answer="${INSTALL_CHANGEN2:-}"
+if [ -z "$answer" ]; then
+    read -rp "Install optional Changen2 model support (research use, ~1 GB)? [y/N] " answer || answer=""
+fi
+if [[ "$answer" =~ ^([Yy]|1)$ ]]; then
+    pip install --no-deps torchange ever-beta
+    pip install albumentations tifffile tqdm wandb prettytable tensorboard matplotlib datasets huggingface_hub
+else
+    echo "Skipped. The Changen2 model will show install instructions if selected."
+fi
 
 # -----------------------------------------------
 # 6. Write environment config for plugin

@@ -68,12 +68,13 @@ def read_image(path):
     if ext in (".tif", ".tiff"):
         try:
             from osgeo import gdal
+            from uchange_qgis_plugin.raster_io import read_band
             gdal.UseExceptions()
             ds = gdal.Open(path, gdal.GA_ReadOnly)
             if ds is not None:
                 bands = []
                 for i in range(1, min(ds.RasterCount, 3) + 1):
-                    bands.append(ds.GetRasterBand(i).ReadAsArray())
+                    bands.append(read_band(ds.GetRasterBand(i)))
                 img = np.stack(bands, axis=-1)
                 if img.dtype != np.uint8:
                     max_val = img.max()
@@ -92,8 +93,11 @@ def read_image(path):
                 }
                 ds = None
                 return img, geo_info
-        except Exception:
-            pass
+        except Exception as e:
+            # Reading without GDAL loses the georeferencing (no map coordinates,
+            # no pixel size, no co-registration): say so instead of failing silently.
+            _log(f"  WARNING: GDAL could not read {os.path.basename(path)} ({type(e).__name__}: {e}); "
+                 "reading it without georeferencing")
 
     img = np.array(Image.open(path).convert("RGB"))
     return img, geo_info
@@ -102,13 +106,14 @@ def read_image(path):
 def save_geotiff(path, array, geo_info):
     """Save a single-band array as GeoTIFF with georeferencing."""
     from osgeo import gdal
+    from uchange_qgis_plugin.raster_io import write_band
     gdal.UseExceptions()
     h, w = array.shape
     drv = gdal.GetDriverByName("GTiff")
     ds = drv.Create(path, w, h, 1, gdal.GDT_Byte)
     ds.SetGeoTransform(geo_info["geotransform"])
     ds.SetProjection(geo_info["projection"])
-    ds.GetRasterBand(1).WriteArray(array)
+    write_band(ds.GetRasterBand(1), array.astype(np.uint8))
     ds.FlushCache()
     ds = None
 
