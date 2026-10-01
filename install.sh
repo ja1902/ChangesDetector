@@ -110,20 +110,35 @@ pip install -r "$SCRIPT_DIR/requirements.txt"
 # Pin GDAL Python bindings to match the system library version.
 # Build from source (--no-binary) with numpy present (--no-build-isolation)
 # so that gdal_array is compiled correctly.
+# GDAL's NumPy module (osgeo.gdal_array) supports NumPy 2 only from GDAL 3.9.
+# With an older system GDAL (Ubuntu 22.04: 3.4, 24.04: 3.8) it builds against
+# NumPy 2 but fails to load, so keep NumPy 1.26 there (wheels exist for
+# Python 3.10-3.12) and an OpenCV that still supports it.
+if python -c "import sys; v = tuple(int(x) for x in '$GDAL_VERSION'.split('.')[:2]); sys.exit(0 if v < (3, 9) else 1)"; then
+    if [ "$PY_MINOR" -le 12 ]; then
+        echo "GDAL $GDAL_VERSION predates NumPy 2 support: using NumPy 1.26."
+        pip install "numpy>=1.26,<2" "opencv-python-headless<4.12"
+    else
+        echo "WARNING: GDAL $GDAL_VERSION does not support NumPy 2, and Python 3.$PY_MINOR needs it."
+        echo "         Co-registration will be unavailable (change detection still works)."
+    fi
+fi
+
 echo "Installing GDAL Python bindings (v$GDAL_VERSION)..."
 pip install --no-cache-dir --no-binary GDAL --no-build-isolation "GDAL==$GDAL_VERSION"
 
-# GDAL < 3.9 silently builds its bindings without NumPy support if NumPy cannot
-# be imported during the build. The plugin works without it (it reads and
-# writes rasters through plain buffers), but co-registration (AROSICS) needs it.
+# The plugin itself works without osgeo.gdal_array (it reads and writes rasters
+# through plain buffers), but co-registration (AROSICS) needs it. Rebuild once
+# if it does not load, e.g. bindings built earlier against another NumPy.
 if ! python -c "from osgeo import gdal_array" 2>/dev/null; then
-    echo "GDAL bindings were built without NumPy support; rebuilding once..."
-    pip install --force-reinstall --no-deps --no-cache-dir --no-binary GDAL         --no-build-isolation -v "GDAL==$GDAL_VERSION" 2>&1 | grep -iE "numpy|array support" || true
+    echo "GDAL's NumPy support does not load; rebuilding the bindings..."
+    pip install --force-reinstall --no-deps --no-cache-dir --no-binary GDAL         --no-build-isolation "GDAL==$GDAL_VERSION" >/dev/null 2>&1 || true
 fi
 if python -c "from osgeo import gdal_array" 2>/dev/null; then
     echo "GDAL NumPy support: OK"
 else
-    echo "WARNING: GDAL's NumPy support (osgeo.gdal_array) is still missing."
+    echo "WARNING: GDAL's NumPy support (osgeo.gdal_array) does not load:"
+    python -c "import osgeo._gdal_array" 2>&1 | tail -1 | sed 's/^/         /'
     echo "         Change detection works, but automatic co-registration will be skipped."
 fi
 
