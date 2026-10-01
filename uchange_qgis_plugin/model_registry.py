@@ -17,6 +17,10 @@ PRESETS = {
         "logit_adjust": True, "target_gsd": 0.5, "threshold": 0.70,
         # speckle removal (cleanup.py): off until its settings are validated
         "core_threshold": 0.0, "min_blob_m2": 0.0, "min_width_m": 0.0,
+        # Fast mode (no flip averaging) offered in the dialog. No separate
+        # "fast_threshold" yet: 0.70 is reused until one is measured
+        # (scripts/e2026/e10_fast_mode.py).
+        "fast_mode": True,
     },
     "ensemble": {
         "tile_size": 252, "overlap": 64, "scale": 1.4, "tta": True,
@@ -72,6 +76,17 @@ LANDCOVER_PALETTE = (
     (255, 255, 255), (210, 180, 140), (144, 238, 144), (128, 128, 128),
     (34, 139, 34), (30, 144, 255), (255, 215, 0), (178, 34, 34),
 )
+
+
+def preset_threshold(preset, tta):
+    """The preset's tested threshold for how it is run.
+
+    Presets were tuned with flip averaging; run without it (fast mode), a
+    preset may carry its own "fast_threshold", tuned the same way.
+    """
+    if preset.get("tta") and not tta and "fast_threshold" in preset:
+        return float(preset["fast_threshold"])
+    return float(preset["threshold"])
 
 
 def is_scd_model(display_name):

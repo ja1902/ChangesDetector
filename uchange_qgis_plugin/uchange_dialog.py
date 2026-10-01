@@ -17,7 +17,7 @@ from qgis.PyQt.QtGui import QColor
 from qgis.gui import QgsMapLayerComboBox
 
 from .model_registry import (
-    MODEL_REGISTRY, is_scd_model, is_labelled_model, resolve_weights_path,
+    MODEL_REGISTRY, PRESETS, is_scd_model, is_labelled_model, resolve_weights_path,
     SECOND_SEMANTIC_CLASSES, SECOND_SEMANTIC_PALETTE,
     LANDCOVER_CLASSES, LANDCOVER_PALETTE,
 )
@@ -103,6 +103,15 @@ class UChangeDialog(QDialog):
             "Helps when images have different brightness or color balance."
         )
         proc_form.addRow("", self.histogram_match_check)
+
+        self.fast_mode_check = QCheckBox("Fast mode")
+        self.fast_mode_check.setChecked(False)
+        self.fast_mode_check.setToolTip(
+            "About 4x faster, slightly less accurate.\n"
+            "Skips the flip averaging the recommended models normally use\n"
+            "(each image is processed once instead of four times)."
+        )
+        proc_form.addRow("", self.fast_mode_check)
 
         self.tile_size = QSpinBox()
         self.tile_size.setRange(128, 1024)
@@ -224,7 +233,14 @@ class UChangeDialog(QDialog):
         self._populate_model_selector()
         self._on_mode_changed_visibility()
 
+    def _uses_preset(self):
+        """The selected model runs with a preset that offers Fast mode."""
+        entry = self._model_registry.get(self.model_selector.currentText(), {})
+        preset = PRESETS.get(entry.get("preset"), {})
+        return bool(preset.get("fast_mode")) and not self.custom_weights_check.isChecked()
+
     def _on_mode_changed_visibility(self):
+        self.fast_mode_check.setVisible(self._uses_preset())
         # Threshold and min-area apply to everything that writes polygons.
         scd = self._raster_output()
         self.auto_threshold_check.setVisible(not scd)
@@ -471,6 +487,8 @@ class UChangeDialog(QDialog):
             cmd.extend(["--model-type", model_entry["type"]])
         if model_entry.get("preset") and not self.custom_weights_check.isChecked():
             cmd.extend(["--preset", model_entry["preset"]])
+            if self.fast_mode_check.isChecked():
+                cmd.append("--fast")
 
         self._log("Starting inference subprocess...")
         proc = subprocess.Popen(

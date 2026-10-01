@@ -28,7 +28,7 @@ from PIL import Image
 
 import torch
 
-from uchange_qgis_plugin.model_registry import DEFAULT_WEIGHTS, PRESETS
+from uchange_qgis_plugin.model_registry import DEFAULT_WEIGHTS, PRESETS, preset_threshold
 
 
 _json_progress = False
@@ -172,9 +172,7 @@ def label_changes(args, model, head, device, binary_mask, before_img, after_img,
     return out
 
 
-def main():
-    global _json_progress
-
+def build_parser():
     parser = argparse.ArgumentParser(description="Change detection on custom images")
     parser.add_argument("--before", required=True, help="Path to before image")
     parser.add_argument("--after", required=True, help="Path to after image")
@@ -219,8 +217,14 @@ def main():
                         help="Evaluated inference settings for a model (fills the options below)")
     parser.add_argument("--scale", type=float, default=None,
                         help="Upsample images by this factor before tiling (DINOv2 presets: 1.4)")
-    parser.add_argument("--tta", action="store_true", default=None,
+    parser.add_argument("--tta", dest="tta", action="store_true", default=None,
                         help="Average predictions over horizontal/vertical flips")
+    parser.add_argument("--no-tta", dest="tta", action="store_false",
+                        help="No flip averaging, even if the preset uses it")
+    parser.add_argument("--fast", action="store_true",
+                        help="Fast mode: no flip averaging (about 4x faster, slightly less accurate). "
+                             "Keeps the preset's upscaling (add --scale 1.0 to drop it too) and uses "
+                             "the preset's fast-mode threshold")
     parser.add_argument("--logit-adjust", action="store_true", default=None,
                         help="Remove the LEVIR change prior from the logits (thresholds of the presets assume it)")
     parser.add_argument("--target-gsd", type=float, default=None,
@@ -236,7 +240,11 @@ def main():
                         help="Turn the preset's speckle removal off")
     parser.add_argument("--landcover-head", default="landcover_dinov2_vitb14_oem_second.pth",
                         help="Land-cover head for --model-type dinov2_lc (labelled change)")
-    args = parser.parse_args()
+    return parser
+
+
+def resolve_settings(args):
+    """Fill model, weights, preset options and fast mode in place; returns the preset."""
 
     # Defaults: the recommended DINOv2 model, run the way it was tested.
     if args.weights is None and args.model_type is None and args.preset is None:
@@ -254,6 +262,17 @@ def main():
                           ("core_threshold", 0.0), ("min_blob_m2", 0.0), ("min_width_m", 0.0)):
         if getattr(args, key) is None:
             setattr(args, key, preset.get(key, fallback))
+    if args.fast:
+        args.tta = False
+
+    return preset
+
+
+def main():
+    global _json_progress
+
+    args = build_parser().parse_args()
+    preset = resolve_settings(args)
 
     _json_progress = args.json_progress
 
@@ -267,8 +286,12 @@ def main():
 
     if args.threshold == "auto" and "threshold" in preset:
         args.auto_threshold = False
-        args.threshold = float(preset["threshold"])
-        _log(f"Recommended threshold for this model: {args.threshold:.2f}")
+        args.threshold = preset_threshold(preset, args.tta)
+        fast = ""
+        if preset.get("tta") and not args.tta:
+            fast = (" (fast mode: no flip averaging)" if "fast_threshold" in preset else
+                    " (fast mode: no flip averaging; threshold tested with flip averaging)")
+        _log(f"Recommended threshold for this model: {args.threshold:.2f}{fast}")
     elif args.threshold == "auto":
         args.auto_threshold = True
         args.threshold = 0.5  # placeholder, will be computed after inference

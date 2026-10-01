@@ -17,6 +17,10 @@ Share of truly changed pixels whose before *and* after class are right:
 
 Changes are found by the building-focused v0.7 model, so this mode suits building and urban change: on the French data it found changes far better than the UPerNet (IoU 0.22 vs 0.05). Changes that involve no building, such as forest cleared for farmland, are largely missed. Needs `landcover_dinov2_vitb14_oem_second.pth` (the installer downloads it). CLI: `--model-type dinov2_lc --preset synthetic --threshold auto --output-gpkg out.gpkg`.
 
+### Fast mode
+
+A **Fast mode** checkbox (CLI: `--fast`) for the recommended binary and labelled-change models skips flip averaging: about 4x faster, slightly less accurate. It keeps the 1.4x upscaling (`--scale 1.0` drops that too; `--no-tta` / `--tta` set flip averaging directly).
+
 ### Models dropped
 
 ChangerEx (R18) and the SCD UPerNet (R18) are no longer installed or listed: the DINOv2 models beat ChangerEx on every unseen dataset tested, and the new labelled-change mode replaces the SCD UPerNet for building and urban change. Their weights stay on the [v0.6.0 release](https://github.com/ja1902/ChangesDetector/releases/tag/v0.6.0), and the CLI still runs them with `--model-type opencd` / `--model-type opencd_scd --mode semantic`. All v0.8 weights are on the single v0.8.0 release.

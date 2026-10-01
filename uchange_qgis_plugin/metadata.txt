@@ -2,7 +2,7 @@
 name=ChangeDetection
 qgisMinimumVersion=3.22
 description=Satellite image change detection with DINOv2 deep learning models, including labelled (from -> to) change, on CPU or GPU
-version=0.8.1
+version=0.8.2
 author=ChangeDetection
 email=uchange@example.com
 about=Detects changes between two georeferenced images using deep learning. Binary change detection with DINOv2 models that generalise to new regions and resolutions, and labelled change: each change polygon gets its before and after land-cover class (DINOv2 + land-cover head). Includes automatic co-registration, resampling of coarse imagery, and CPU/GPU inference. Works with Python 3.10-3.14. Model weights are for research / non-commercial use.
