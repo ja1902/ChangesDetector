@@ -69,6 +69,37 @@ def resample_rgb(img, factor):
     return np.array(Image.fromarray(img).resize(size, mode))
 
 
+def resample_rows(rows, full_hw, out_hw, r0, r1, mode, offset=0):
+    """Rows r0:r1 of a full_hw image resized to out_hw, without the whole image.
+
+    `rows` holds rows offset .. offset + len(rows) of the full image; they must
+    cover the filter's reach around the requested rows. Matches resizing the
+    whole image and slicing, up to rounding (PIL is given the same sampling grid
+    through `box`; uint8 output can differ by 1 on a few pixels).
+    """
+    h, w = full_hw
+    s = h / float(out_hw[0])
+    c0, c1 = first_row_needed(h, out_hw[0], r0), rows_needed(h, out_hw[0], r1)
+    if c0 < offset or c1 > offset + len(rows):
+        raise ValueError("resample_rows: rows %d-%d needed, %d-%d given"
+                         % (c0, c1, offset, offset + len(rows)))
+    part = Image.fromarray(np.ascontiguousarray(rows[c0 - offset:c1 - offset]))
+    box = (0, r0 * s - c0, w, r1 * s - c0)
+    return np.array(part.resize((out_hw[1], r1 - r0), mode, box=box))
+
+
+def rows_needed(full_h, out_h, r1):
+    """Last input row (exclusive) that resample_rows reads for output rows < r1."""
+    s = full_h / float(out_h)
+    return min(full_h, int(math.ceil(r1 * s)) + int(math.ceil(2 * max(1.0, s))) + 2)
+
+
+def first_row_needed(full_h, out_h, r0):
+    """First input row that resample_rows reads for output rows >= r0."""
+    s = full_h / float(out_h)
+    return max(0, int(math.floor(r0 * s)) - int(math.ceil(2 * max(1.0, s))) - 2)
+
+
 def resample_prob(prob, shape_hw):
     """Float probability map back to (h, w)."""
     h, w = shape_hw

@@ -307,3 +307,130 @@ def run_tiled_inference(model, pre_img, post_img, tile_size, overlap, device,
         }
 
     return prob_map
+
+
+def _tile_rows(tiles):
+    """Tiles grouped into rows: [(y0, y1, [(x0, x1, multiplicity), ...]), ...].
+
+    generate_tiles can repeat a tile at the image edge; a repeat is run once
+    and counted `multiplicity` times, which averages exactly as before.
+    """
+    rows = {}
+    for y0, x0, y1, x1 in tiles:
+        row = rows.setdefault((y0, y1), {})
+        row[(x0, x1)] = row.get((x0, x1), 0) + 1
+    return [(y0, y1, [(x0, x1, k) for (x0, x1), k in row.items()])
+            for (y0, y1), row in rows.items()]
+
+
+def run_scaled_inference(model, pre_img, post_img, factor, tile_size, overlap, device,
+                         progress_fn=None, cancel_fn=None, grayscale=False,
+                         hist_match=False, tta=False, logit_adjust=False):
+    """Binary change probability at the input resolution, inferred at x`factor`.
+
+    Gives the result of
+        resample_prob(run_tiled_inference(model, resample_rgb(pre_img, factor),
+                      resample_rgb(post_img, factor), ...), pre_img.shape[:2])
+    (up to rounding) while holding only a strip of the upsampled images and of
+    the working-resolution probabilities: one row of tiles at a time is
+    resampled, run, averaged and taken back to the input resolution.
+    """
+    from PIL import Image
+    from .resolution import first_row_needed, resample_rgb, resample_rows, rows_needed
+
+    h, w = pre_img.shape[:2]
+    scaled = abs(factor - 1.0) >= 1e-6
+    H, W = (max(1, int(round(h * factor))), max(1, int(round(w * factor)))) if scaled else (h, w)
+    if scaled and factor < 1:
+        # Shrinking: the result is small, and box filtering is not reproducible
+        # strip by strip, so shrink the whole images first.
+        pre_img, post_img = resample_rgb(pre_img, factor), resample_rgb(post_img, factor)
+    upsample_rows = scaled and factor > 1
+
+    rows = _tile_rows(generate_tiles(H, W, tile_size, overlap))
+    total = sum(len(xs) for _, _, xs in rows)
+    batch_size = _estimate_batch_size(device, tile_size, model=model)
+
+    out = np.empty((h, w), dtype=np.float32)
+    acc = np.zeros((0, W), dtype=np.float32)        # working rows top .. top+len
+    cnt = np.zeros((0, W), dtype=np.float32)
+    top = 0                                         # working row of acc[0]
+    done_rows = 0                                   # output rows written
+    done_tiles = 0
+
+    def working_rows(img, y0, y1):
+        if not upsample_rows:
+            return img[y0:y1]
+        return resample_rows(img, (h, w), (H, W), y0, y1, Image.BILINEAR)
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        for i, (y0, y1, xs) in enumerate(rows):
+            pre_band = working_rows(pre_img, y0, y1)
+            post_band = working_rows(post_img, y0, y1)
+            if y1 - top > len(acc):
+                grow = y1 - top - len(acc)
+                acc = np.concatenate([acc, np.zeros((grow, W), dtype=np.float32)])
+                cnt = np.concatenate([cnt, np.zeros((grow, W), dtype=np.float32)])
+
+            band_tiles = [(0, x0, y1 - y0, x1) for x0, x1, _ in xs]
+            weights = [k for _, _, k in xs]
+
+            def prepare(start, size):
+                return executor.submit(_prepare_batch, band_tiles[start:start + size],
+                                       pre_band, post_band, tile_size, grayscale, hist_match)
+
+            start = 0
+            future = prepare(0, batch_size)
+            while start < len(band_tiles):
+                if cancel_fn and cancel_fn():
+                    return None
+                pre_batch, post_batch, tile_meta = future.result()
+                n = len(tile_meta)
+                if start + n < len(band_tiles):
+                    future = prepare(start + n, batch_size)
+                try:
+                    probs = _run_batch(model, pre_batch, post_batch, device,
+                                       tta=tta, logit_adjust=logit_adjust)
+                except RuntimeError as e:
+                    if "out of memory" not in str(e).lower() or batch_size <= 1:
+                        raise
+                    import torch
+                    torch.cuda.empty_cache()
+                    batch_size = max(1, batch_size // 2)
+                    future.cancel()
+                    future = prepare(start, batch_size)
+                    continue
+                for j, (_, x0, _, x1, th, tw) in enumerate(tile_meta):
+                    k = weights[start + j]
+                    p = probs[j, :th, :tw]
+                    acc[y0 - top:y0 - top + th, x0:x1] += p if k == 1 else k * p
+                    cnt[y0 - top:y0 - top + th, x0:x1] += k
+                start += n
+                done_tiles += n
+                if progress_fn:
+                    progress_fn(done_tiles, total)
+
+            # Working rows above the next tile row get no more tiles.
+            final = rows[i + 1][0] if i + 1 < len(rows) else H
+            if not scaled:
+                r1 = final
+            elif final == H:
+                r1 = h
+            else:
+                r1 = done_rows
+                while r1 < h and rows_needed(H, h, r1 + 1) <= final:
+                    r1 += 1
+            if r1 <= done_rows:
+                continue
+            ready = acc[:final - top] / np.maximum(cnt[:final - top], 1.0)
+            if scaled:
+                out[done_rows:r1] = resample_rows(ready, (H, W), (h, w), done_rows, r1,
+                                                  Image.BILINEAR, offset=top)
+                keep_from = first_row_needed(H, h, r1) if r1 < h else H
+            else:
+                out[done_rows:r1] = ready
+                keep_from = r1
+            done_rows = r1
+            acc, cnt = acc[keep_from - top:].copy(), cnt[keep_from - top:].copy()
+            top = keep_from
+    return out

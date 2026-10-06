@@ -62,7 +62,12 @@ def build_scd_model(checkpoint_path, device):
 
 
 def build_dinov2_model(checkpoint_path, device):
-    ckpt = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+    # Memory-mapped: the weights are copied into the model straight from the
+    # file instead of from a second in-memory copy (saves ~0.35 GB of RAM).
+    try:
+        ckpt = torch.load(checkpoint_path, map_location="cpu", weights_only=False, mmap=True)
+    except (TypeError, RuntimeError):     # torch < 2.1, or an old-format file
+        ckpt = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
     cfg = ckpt['config']
 
     backbone = VisionTransformer(

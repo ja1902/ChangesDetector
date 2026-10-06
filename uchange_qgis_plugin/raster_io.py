@@ -35,6 +35,28 @@ def write_band(band, array):
     band.WriteRaster(0, 0, w, h, arr.tobytes(), w, h, _NUMPY_TO_GDAL[arr.dtype])
 
 
+def bands_to_rgb8(bands):
+    """2D bands -> (H, W, n) uint8; values above 255 are scaled by the maximum.
+
+    Same values as (np.stack(bands, -1).astype(np.float64) / max * 255).astype(np.uint8),
+    converted a block of rows at a time, so a 16-bit image never needs a
+    float64 copy of the whole raster (8x its 8-bit size).
+    """
+    h, w = bands[0].shape
+    out = np.empty((h, w, len(bands)), dtype=np.uint8)
+    max_val = None
+    if any(b.dtype != np.uint8 for b in bands):
+        max_val = np.max([b.max() for b in bands])
+    step = max(1, (1 << 20) // max(w, 1))
+    for i, band in enumerate(bands):
+        for y in range(0, h, step):
+            blk = band[y:y + step]
+            if max_val is not None and max_val > 255:
+                blk = blk.astype(np.float64) / max_val * 255
+            out[y:y + step, :, i] = blk.astype(np.uint8)
+    return out
+
+
 def read_raster(source_path):
     """Read a raster file and return image data with georeferencing info.
 
@@ -58,13 +80,7 @@ def read_raster(source_path):
         band = read_band(ds.GetRasterBand(i))
         bands.append(band)
 
-    image = np.stack(bands, axis=-1)
-    if image.dtype != np.uint8:
-        max_val = image.max()
-        if max_val > 255:
-            image = (image.astype(np.float64) / max_val * 255).astype(np.uint8)
-        else:
-            image = image.astype(np.uint8)
+    image = bands_to_rgb8(bands)
     geotransform = ds.GetGeoTransform()
     projection_wkt = ds.GetProjection()
 

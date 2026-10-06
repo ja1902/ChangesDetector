@@ -68,21 +68,17 @@ def read_image(path):
     if ext in (".tif", ".tiff"):
         try:
             from osgeo import gdal
-            from uchange_qgis_plugin.raster_io import read_band
+            from uchange_qgis_plugin.raster_io import bands_to_rgb8, read_band
             gdal.UseExceptions()
             ds = gdal.Open(path, gdal.GA_ReadOnly)
             if ds is not None:
                 bands = []
                 for i in range(1, min(ds.RasterCount, 3) + 1):
                     bands.append(read_band(ds.GetRasterBand(i)))
-                img = np.stack(bands, axis=-1)
-                if img.dtype != np.uint8:
-                    max_val = img.max()
-                    if max_val > 255:
-                        _log(f"  Warning: {img.dtype} image detected, rescaling to 8-bit")
-                        img = (img.astype(np.float64) / max_val * 255).astype(np.uint8)
-                    else:
-                        img = img.astype(np.uint8)
+                if bands[0].dtype != np.uint8 and max(b.max() for b in bands) > 255:
+                    _log(f"  Warning: {bands[0].dtype} image detected, rescaling to 8-bit")
+                img = bands_to_rgb8(bands)
+                del bands
                 if img.shape[2] == 1:
                     img = np.repeat(img, 3, axis=2)
                 geo_info = {
@@ -116,6 +112,25 @@ def save_geotiff(path, array, geo_info):
     write_band(ds.GetRasterBand(1), array.astype(np.uint8))
     ds.FlushCache()
     ds = None
+
+
+# comparison.png is a quick look: each panel is shrunk to at most this many
+# pixels on its long side, so a large scene does not need a full-size copy.
+PREVIEW_SIDE = 2048
+
+
+def save_comparison(path, panels):
+    """Before | after | result side by side; panels are (H, W, 3) or (H, W) uint8."""
+    h, w = panels[0].shape[:2]
+    f = min(1.0, PREVIEW_SIDE / float(max(h, w)))
+    size = (max(1, int(round(w * f))), max(1, int(round(h * f))))
+    small = []
+    for p in panels:
+        if f < 1.0:
+            import cv2
+            p = cv2.resize(p, size, interpolation=cv2.INTER_AREA)
+        small.append(np.repeat(p[:, :, None], 3, axis=2) if p.ndim == 2 else p)
+    Image.fromarray(np.concatenate(small, axis=1)).save(path)
 
 
 def label_changes(args, model, head, device, binary_mask, before_img, after_img,
@@ -432,7 +447,7 @@ def main():
 
     os.makedirs(args.output, exist_ok=True)
 
-    from uchange_qgis_plugin.tiling import run_tiled_inference
+    from uchange_qgis_plugin.tiling import run_scaled_inference, run_tiled_inference
 
     t0 = time.time()
     _log(f"Running {'SCD' if args.mode == 'semantic' else 'binary'} tiled inference...")
@@ -445,19 +460,15 @@ def main():
         _log("Histogram matching: per-tile (after → before)")
 
     try:
-        result = run_tiled_inference(
-            model, resample_rgb(before_img, factor), resample_rgb(after_img, factor),
-            tile_size=args.tile_size,
-            overlap=args.overlap,
-            device=device,
-            grayscale=args.grayscale,
-            progress_fn=progress_fn,
-            hist_match=args.histogram_match,
-            tta=args.tta,
-            logit_adjust=args.logit_adjust,
-        )
-        if args.mode != "semantic":
-            result = resample_prob(result, (h, w))
+        tile_kw = dict(tile_size=args.tile_size, overlap=args.overlap, device=device,
+                       grayscale=args.grayscale, progress_fn=progress_fn,
+                       hist_match=args.histogram_match, tta=args.tta,
+                       logit_adjust=args.logit_adjust)
+        if args.mode == "semantic":
+            result = run_tiled_inference(model, before_img, after_img, **tile_kw)
+        else:
+            # A strip at a time: the upsampled images never sit in memory whole.
+            result = run_scaled_inference(model, before_img, after_img, factor, **tile_kw)
         if cs_model is not None:
             # ChangeStar was evaluated at native scale: only the GSD correction applies.
             from uchange_qgis_plugin.changestar_bridge import changestar_probs
@@ -532,9 +543,8 @@ def main():
         Image.fromarray(colored).save(png_path)
         _log(f"Saved: {png_path}")
 
-        vis = np.concatenate([before_img, after_img, colored], axis=1)
         comparison_path = os.path.join(args.output, "comparison.png")
-        Image.fromarray(vis).save(comparison_path)
+        save_comparison(comparison_path, [before_img, after_img, colored])
         _log(f"Saved: {comparison_path}")
 
         _progress(100)
@@ -603,13 +613,13 @@ def main():
             _log(f"Saved: {mask_path}")
             result_info["output_path"] = mask_path
 
-        mask_vis = np.stack([binary_mask * 255] * 3, axis=-1).astype(np.uint8)
-        vis = np.concatenate([before_img, after_img, mask_vis], axis=1)
         comparison_path = os.path.join(args.output, "comparison.png")
-        Image.fromarray(vis).save(comparison_path)
+        save_comparison(comparison_path, [before_img, after_img, binary_mask * 255])
         _log(f"Saved: {comparison_path}")
 
-        prob_vis = (prob_map * 255).clip(0, 255).astype(np.uint8)
+        prob_vis = np.empty(prob_map.shape, dtype=np.uint8)
+        for y in range(0, prob_map.shape[0], 1024):     # no full-size float temporaries
+            prob_vis[y:y + 1024] = (prob_map[y:y + 1024] * 255).clip(0, 255)
         prob_path = os.path.join(args.output, "probability.png")
         Image.fromarray(prob_vis).save(prob_path)
         _log(f"Saved: {prob_path}")
