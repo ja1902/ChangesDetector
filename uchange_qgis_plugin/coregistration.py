@@ -101,6 +101,47 @@ def _strip_nodata_vrt(path: str) -> Optional[str]:
     return vrt_path
 
 
+def _apply_shift(ref_path: str, tgt_path: str, shift_x_map: float, shift_y_map: float,
+                 out_path: str):
+    """Write the target moved by the shift onto the reference pixel grid.
+
+    AROSICS' own correct_shifts() is not used: py_tools_ds converts the
+    geotransform to ENVI map info, which only knows UTM and lat/lon. Any other
+    CRS (e.g. British National Grid, EPSG:27700) silently becomes pixel
+    coordinates, and the corrected image comes out entirely nodata (black).
+    """
+    from osgeo import gdal
+    gdal.UseExceptions()
+
+    ref_ds = gdal.Open(ref_path, gdal.GA_ReadOnly)
+    rgt = ref_ds.GetGeoTransform()
+    rw, rh = ref_ds.RasterXSize, ref_ds.RasterYSize
+    ref_prj = ref_ds.GetProjection()
+    ref_ds = None
+
+    fd, vrt_path = tempfile.mkstemp(suffix='.vrt', prefix='coreg_shift_')
+    os.close(fd)
+    try:
+        gdal.Translate(vrt_path, tgt_path, format='VRT')
+        vrt = gdal.Open(vrt_path, gdal.GA_Update)
+        gt = list(vrt.GetGeoTransform())
+        gt[0] += shift_x_map
+        gt[3] += shift_y_map
+        vrt.SetGeoTransform(gt)
+        nodata = vrt.GetRasterBand(1).GetNoDataValue()
+        vrt = None
+
+        x0, y0 = rgt[0], rgt[3]
+        x1, y1 = x0 + rw * rgt[1], y0 + rh * rgt[5]
+        gdal.Warp(out_path, vrt_path, format='GTiff', dstSRS=ref_prj,
+                  outputBounds=(min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1)),
+                  width=rw, height=rh, resampleAlg='cubic',
+                  srcNodata=nodata, dstNodata=nodata)
+    finally:
+        if os.path.isfile(vrt_path):
+            os.remove(vrt_path)
+
+
 def coregister_images(
     ref_path: str,
     tgt_path: str,
@@ -130,8 +171,6 @@ def coregister_images(
         coreg = COREG(
             im_ref=effective_ref,
             im_tgt=effective_tgt,
-            path_out=temp_path,
-            fmt_out='GTIFF',
             ws=window_size,
             max_shift=max_shift,
             align_grids=True,
@@ -160,7 +199,8 @@ def coregister_images(
                 message="Images are already well-aligned (shift < 0.01px)",
             )
 
-        coreg.correct_shifts()
+        shifts = coreg.coreg_info['corrected_shifts_map']
+        _apply_shift(effective_ref, effective_tgt, shifts['x'], shifts['y'], temp_path)
 
         return CoregResult(
             success=True,
