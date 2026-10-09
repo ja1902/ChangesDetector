@@ -67,64 +67,40 @@ echo Installing AROSICS (co-registration)...
 pip install arosics geoarray py_tools_ds shapely scikit-image
 
 :: -----------------------------------------------
-:: 5. Download model weights from GitHub Releases
+:: 5. Model weights: Meta's DINOv2 backbone + the trained parts in weights\
 :: -----------------------------------------------
 echo.
-echo Downloading model weights...
+echo Setting up model weights...
 
-set "GITHUB_RELEASE=https://github.com/ja1902/ChangesDetector/releases/download/v0.8.0"
+:: The DINOv2 change models are a trained decoder on Meta's frozen DINOv2
+:: ViT-B/14. The decoders and the land-cover head ship in weights\ (research /
+:: non-commercial use); the backbone comes from Meta's official release.
+set "BACKBONE_URL=https://dl.fbaipublicfiles.com/dinov2/dinov2_vitb14/dinov2_vitb14_pretrain.pth"
+set "BACKBONE=%SCRIPT_DIR%\dinov2_vitb14_pretrain.pth"
+set "ASSEMBLE=%SCRIPT_DIR%\weights\assemble.py"
 
-:: Model weights are for research / non-commercial use (CC BY-NC-SA 4.0 training data).
-set "SYNTH_WEIGHTS=%SCRIPT_DIR%\dinov2_vitb14_c2s1_levir.pth"
-if exist "%SYNTH_WEIGHTS%" (
-    echo DINOv2 synthetic-data weights already exist, skipping download.
-) else (
-    echo Downloading DINOv2 ViT-B/14 + synthetic data [recommended]...
-    curl -L --fail --progress-bar -o "%SYNTH_WEIGHTS%" "%GITHUB_RELEASE%/dinov2_vitb14_c2s1_levir.pth"
-    if !errorlevel! neq 0 (
-        del "%SYNTH_WEIGHTS%" 2>nul
-        echo WARNING: Download failed. Please download dinov2_vitb14_c2s1_levir.pth from
-        echo          https://github.com/ja1902/ChangesDetector/releases and place it at: %SYNTH_WEIGHTS%
+:: assemble.py exits 3 when the backbone is needed (a model file is missing).
+python "%ASSEMBLE%" "%SCRIPT_DIR%"
+set "ASSEMBLE_STATUS=!errorlevel!"
+if "!ASSEMBLE_STATUS!"=="3" (
+    echo Downloading the DINOv2 ViT-B/14 backbone [346 MB] from Meta [dl.fbaipublicfiles.com]...
+    curl -L --fail --progress-bar -o "%BACKBONE%" "%BACKBONE_URL%"
+    set "BUILD_OK=0"
+    if !errorlevel! equ 0 (
+        python "%ASSEMBLE%" "%SCRIPT_DIR%" "%BACKBONE%"
+        if !errorlevel! equ 0 set "BUILD_OK=1"
     )
-)
-
-set "LC_HEAD=%SCRIPT_DIR%\landcover_dinov2_vitb14_oem_second.pth"
-if exist "%LC_HEAD%" (
-    echo Land-cover head weights already exist, skipping download.
-) else (
-    echo Downloading DINOv2 land-cover head [labelled change]...
-    curl -L --fail --progress-bar -o "%LC_HEAD%" "%GITHUB_RELEASE%/landcover_dinov2_vitb14_oem_second.pth"
-    if !errorlevel! neq 0 (
-        del "%LC_HEAD%" 2>nul
-        echo WARNING: Download failed. Please download landcover_dinov2_vitb14_oem_second.pth from
-        echo          https://github.com/ja1902/ChangesDetector/releases and place it at: %LC_HEAD%
+    if "!BUILD_OK!"=="1" (
+        echo Model weights: OK
+    ) else (
+        echo WARNING: The model weights could not be built. Download
+        echo          %BACKBONE_URL%
+        echo          into %SCRIPT_DIR%, then run:
+        echo          python weights\assemble.py . dinov2_vitb14_pretrain.pth
     )
-)
-
-set "LEVIR_WEIGHTS=%SCRIPT_DIR%\dinov2_vitb14_levir.pth"
-if exist "%LEVIR_WEIGHTS%" (
-    echo DINOv2 generalizable weights already exist, skipping download.
-) else (
-    echo Downloading DINOv2 ViT-B/14 [generalizable]...
-    curl -L --fail --progress-bar -o "%LEVIR_WEIGHTS%" "%GITHUB_RELEASE%/dinov2_vitb14_levir.pth"
-    if !errorlevel! neq 0 (
-        del "%LEVIR_WEIGHTS%" 2>nul
-        echo WARNING: Download failed. Please download dinov2_vitb14_levir.pth from
-        echo          https://github.com/ja1902/ChangesDetector/releases and place it at: %LEVIR_WEIGHTS%
-    )
-)
-
-set "DINOV2_WEIGHTS=%SCRIPT_DIR%\dinov2_vitb14_egybcd.pth"
-if exist "%DINOV2_WEIGHTS%" (
-    echo DINOv2 fine-tuned weights already exist, skipping download.
-) else (
-    echo Downloading DINOv2 ViT-B/14 [fine-tuned]...
-    curl -L --fail --progress-bar -o "%DINOV2_WEIGHTS%" "%GITHUB_RELEASE%/dinov2_vitb14_egybcd.pth"
-    if !errorlevel! neq 0 (
-        del "%DINOV2_WEIGHTS%" 2>nul
-        echo WARNING: Download failed. Please download dinov2_vitb14_egybcd.pth from
-        echo          https://github.com/ja1902/ChangesDetector/releases and place it at: %DINOV2_WEIGHTS%
-    )
+    del "%BACKBONE%" 2>nul
+) else if not "!ASSEMBLE_STATUS!"=="0" (
+    echo WARNING: weights\assemble.py failed [see above].
 )
 
 :: -----------------------------------------------

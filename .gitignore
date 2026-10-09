@@ -4,8 +4,9 @@ venv/
 *.pyo
 *.egg-info/
 
-# Model weights (downloaded by install scripts)
+# Model weights (built by the install scripts), except the trained parts in weights/
 **/*.pth
+!weights/*.pth
 **/*.pt
 **/*.ckpt
 

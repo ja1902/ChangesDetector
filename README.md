@@ -15,7 +15,7 @@ Share of truly changed pixels whose before *and* after class are right:
 | SCD UPerNet (v0.7) | 60% | 40% |
 | **DINOv2 + land cover (v0.8)** | **63%** | **50%** |
 
-Changes are found by the building-focused v0.7 model, so this mode suits building and urban change: on the French data it found changes far better than the UPerNet (IoU 0.22 vs 0.05). Changes that involve no building, such as forest cleared for farmland, are largely missed. Needs `landcover_dinov2_vitb14_oem_second.pth` (the installer downloads it). CLI: `--model-type dinov2_lc --preset synthetic --threshold auto --output-gpkg out.gpkg`.
+Changes are found by the building-focused v0.7 model, so this mode suits building and urban change: on the French data it found changes far better than the UPerNet (IoU 0.22 vs 0.05). Changes that involve no building, such as forest cleared for farmland, are largely missed. Needs `landcover_dinov2_vitb14_oem_second.pth` (the installer sets it up). CLI: `--model-type dinov2_lc --preset synthetic --threshold auto --output-gpkg out.gpkg`.
 
 ### Fast mode
 
@@ -23,10 +23,11 @@ A **Fast mode** checkbox (CLI: `--fast`) for the recommended binary and labelled
 
 ### Models dropped
 
-ChangerEx (R18) and the SCD UPerNet (R18) are no longer installed or listed: the DINOv2 models beat ChangerEx on every unseen dataset tested, and the new labelled-change mode replaces the SCD UPerNet for building and urban change. Their weights stay on the [v0.6.0 release](https://github.com/ja1902/ChangesDetector/releases/tag/v0.6.0), and the CLI still runs them with `--model-type opencd` / `--model-type opencd_scd --mode semantic`. All v0.8 weights are on the single v0.8.0 release.
+ChangerEx (R18) and the SCD UPerNet (R18) are no longer installed or listed: the DINOv2 models beat ChangerEx on every unseen dataset tested, and the new labelled-change mode replaces the SCD UPerNet for building and urban change. Their weights stay on the [v0.6.0 release](https://github.com/ja1902/ChangesDetector/releases/tag/v0.6.0), and the CLI still runs them with `--model-type opencd` / `--model-type opencd_scd --mode semantic`.
 
 ### Fixes
 
+- **Weights from the official source**: the DINOv2 models only train a decoder on Meta's frozen DINOv2 ViT-B/14, so the installer now downloads that backbone once (346 MB) from Meta's official release and combines it with the trained decoders, which ship in this repository's `weights/` folder. This replaces three 382 MB downloads from the GitHub release; the resulting files are identical.
 - **CPU**: DINOv2 models crashed on computers without an NVIDIA GPU (float16 weights, float32 inputs); they now run in float32 on CPU.
 - **Installer**: a failed weight download no longer stops the installer. It now checks GDAL's NumPy support after building the bindings, and installs Changen2 support and its weights by default (`INSTALL_CHANGEN2=0 ./install.sh` skips it).
 - **GeoTIFFs on some Linux installs**: when GDAL's Python bindings were built without NumPy support (`No module named '_gdal_array'`), GeoTIFFs were silently read without georeferencing and writing polygons failed. Rasters are now read and written without that module, and a failed GDAL read is reported instead of hidden.
@@ -256,7 +257,7 @@ The installer will:
 1. Create a Python virtual environment
 2. Install PyTorch (with CUDA if GPU detected, CPU otherwise)
 3. Install all dependencies
-4. Download model weights
+4. Set up the model weights (Meta's DINOv2 backbone + the trained parts in `weights/`)
 5. Link the plugin into your QGIS plugins directory
 
 ### Usage
@@ -274,14 +275,20 @@ The installer will:
 
 ### Manual Weight Download
 
-If the installer cannot download weights automatically, download them from the [v0.8.0 release](https://github.com/ja1902/ChangesDetector/releases/tag/v0.8.0) and place them in the project root:
+The DINOv2 models are a trained decoder on Meta's frozen DINOv2 ViT-B/14 backbone. The trained parts are in `weights/`; the installer downloads the backbone from Meta and combines them into the model files in the project root. If that download fails, fetch [dinov2_vitb14_pretrain.pth](https://dl.fbaipublicfiles.com/dinov2/dinov2_vitb14/dinov2_vitb14_pretrain.pth) (346 MB, Apache 2.0) into the project root yourself, then run:
 
-- `dinov2_vitb14_c2s1_levir.pth` (382 MB) -- DINOv2 + synthetic data, the recommended binary model (also finds the changes in semantic mode)
-- `landcover_dinov2_vitb14_oem_second.pth` (14 MB) -- land-cover head for labelled (from -> to) change
-- `dinov2_vitb14_levir.pth` (382 MB) -- DINOv2 generalizable (v0.6)
-- `dinov2_vitb14_egybcd.pth` (382 MB) -- DINOv2 fine-tuned (v0.6)
+```bash
+python weights/assemble.py . dinov2_vitb14_pretrain.pth
+```
 
-Model weights are for research / non-commercial use.
+This builds:
+
+- `dinov2_vitb14_c2s1_levir.pth` -- DINOv2 + synthetic data, the recommended binary model (also finds the changes in semantic mode)
+- `landcover_dinov2_vitb14_oem_second.pth` -- land-cover head for labelled (from -> to) change
+- `dinov2_vitb14_levir.pth` -- DINOv2 generalizable (v0.6)
+- `dinov2_vitb14_egybcd.pth` -- DINOv2 fine-tuned (v0.6)
+
+The backbone file can be deleted afterwards. The trained weights are for research / non-commercial use.
 
 ### Standalone CLI
 
@@ -321,7 +328,7 @@ The backbone stays frozen; only the decoder trains (~9M params, ~4GB VRAM).
 - Restart QGIS after installation
 
 **"Model weights not found" error:**
-- Run the installer to download weights, or download manually (see above)
+- Run the installer to set up the weights, or build them manually (see Manual Weight Download)
 - Or use "Use custom weights file" to point to your own checkpoint
 
 **"CUDA GPU is not available" error:**

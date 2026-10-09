@@ -149,46 +149,44 @@ echo "Installing AROSICS (co-registration)..."
 pip install --no-deps arosics geoarray py_tools_ds
 
 # -----------------------------------------------
-# 5. Download model weights from GitHub Releases
+# 5. Model weights: Meta's DINOv2 backbone + the trained parts in weights/
 # -----------------------------------------------
 echo ""
-echo "Downloading model weights..."
+echo "Setting up model weights..."
 
-GITHUB_RELEASE="https://github.com/ja1902/ChangesDetector/releases/download/v0.8.0"
+# The DINOv2 change models are a trained decoder on Meta's frozen DINOv2
+# ViT-B/14. The decoders and the land-cover head ship in weights/ (research /
+# non-commercial use); the backbone comes from Meta's official release.
+BACKBONE_URL="https://dl.fbaipublicfiles.com/dinov2/dinov2_vitb14/dinov2_vitb14_pretrain.pth"
+BACKBONE="$SCRIPT_DIR/dinov2_vitb14_pretrain.pth"
+ASSEMBLE="$SCRIPT_DIR/weights/assemble.py"
 
-# A failed download warns and continues: the rest of the install still runs,
-# and the file can be placed by hand afterwards.
-download_weights() {
-    local file="$1"
-    local name="$2"
-    local dest="$SCRIPT_DIR/$file"
-    if [ -f "$dest" ]; then
-        echo "$name weights already exist, skipping download."
-        return 0
-    fi
-    echo "Downloading $name..."
-    local ok=0
+# A failed download warns and continues: the rest of the install still runs.
+# assemble.py exits 3 when the backbone is needed (a model file is missing).
+status=0
+python "$ASSEMBLE" "$SCRIPT_DIR" || status=$?
+if [ "$status" -eq 3 ]; then
+    echo "Downloading the DINOv2 ViT-B/14 backbone (346 MB) from Meta (dl.fbaipublicfiles.com)..."
+    ok=0
     if command -v curl &>/dev/null; then
-        curl -L --fail --progress-bar -o "$dest" "$GITHUB_RELEASE/$file" && ok=1
+        curl -L --fail --progress-bar -o "$BACKBONE" "$BACKBONE_URL" && ok=1
     elif command -v wget &>/dev/null; then
-        wget --show-progress -O "$dest" "$GITHUB_RELEASE/$file" && ok=1
+        wget --show-progress -O "$BACKBONE" "$BACKBONE_URL" && ok=1
     else
         echo "ERROR: Neither curl nor wget found. Please install one."
     fi
-    if [ "$ok" -ne 1 ]; then
-        rm -f "$dest"
-        echo "WARNING: Download failed. Please download $file from"
-        echo "         https://github.com/ja1902/ChangesDetector/releases and place it at:"
-        echo "         $dest"
+    if [ "$ok" -eq 1 ] && python "$ASSEMBLE" "$SCRIPT_DIR" "$BACKBONE"; then
+        echo "Model weights: OK"
+    else
+        echo "WARNING: The model weights could not be built. Download"
+        echo "         $BACKBONE_URL"
+        echo "         into $SCRIPT_DIR, then run:"
+        echo "         python weights/assemble.py . dinov2_vitb14_pretrain.pth"
     fi
-    return 0
-}
-
-# Model weights are for research / non-commercial use (CC BY-NC-SA 4.0 training data).
-download_weights dinov2_vitb14_c2s1_levir.pth "DINOv2 ViT-B/14 + synthetic data (recommended)"
-download_weights landcover_dinov2_vitb14_oem_second.pth "DINOv2 land-cover head (labelled change)"
-download_weights dinov2_vitb14_levir.pth "DINOv2 ViT-B/14 (generalizable)"
-download_weights dinov2_vitb14_egybcd.pth "DINOv2 ViT-B/14 (fine-tuned)"
+    rm -f "$BACKBONE"
+elif [ "$status" -ne 0 ]; then
+    echo "WARNING: weights/assemble.py failed (see above)."
+fi
 
 # The "Changen2 ViT-L + DINOv2" model needs torchange (about 1 GB of extra
 # packages plus ~1.2 GB of weights, CC BY-NC-SA 4.0). Installed by default;
