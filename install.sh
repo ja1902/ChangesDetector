@@ -144,9 +144,17 @@ fi
 
 # arosics/geoarray/py_tools_ds officially require GDAL >= 3.8, but work
 # with older versions via our compatibility shims in _gdal_compat.py.
-# Install without deps to avoid pip pulling an incompatible GDAL version.
+# Install without deps to avoid pip pulling an incompatible GDAL version;
+# joblib is the one dependency they import on load that nothing else brings
+# (without it co-registration was silently skipped). The others (cartopy,
+# folium, plotly, ...) are only imported by plotting functions we do not use.
 echo "Installing AROSICS (co-registration)..."
 pip install --no-deps arosics geoarray py_tools_ds
+pip install joblib
+if ! python -c "import arosics" 2>/dev/null; then
+    echo "WARNING: AROSICS does not import; automatic co-registration will be skipped:"
+    { python -c "import arosics" 2>&1 || true; } | tail -1 | sed 's/^/         /'
+fi
 
 # -----------------------------------------------
 # 5. Model weights: Meta's DINOv2 backbone + the trained parts in weights/

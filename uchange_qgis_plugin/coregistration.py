@@ -142,6 +142,10 @@ def _apply_shift(ref_path: str, tgt_path: str, shift_x_map: float, shift_y_map: 
             os.remove(vrt_path)
 
 
+# Least AROSICS shift reliability (%) for a shift to be applied.
+MIN_RELIABILITY = 60.0
+
+
 def coregister_images(
     ref_path: str,
     tgt_path: str,
@@ -187,6 +191,23 @@ def coregister_images(
             return CoregResult(
                 success=False,
                 message="No reliable shift detected between images",
+            )
+
+        # AROSICS accepts any shift up to max_shift. Matching on too little or
+        # too uniform content gives a large, wrong shift of low reliability (a
+        # 512 px crop of an aligned S2Looking pair: 41 px at 2%; the whole
+        # 2048 px scene: 0.3 px at 88%), which adds false change along every
+        # edge. Same cut-off AROSICS uses for its local tie points.
+        reliability = coreg.shift_reliability or 0.0
+        if reliability < MIN_RELIABILITY:
+            os.remove(temp_path)
+            return CoregResult(
+                success=False,
+                shift_x_px=coreg.x_shift_px,
+                shift_y_px=coreg.y_shift_px,
+                message=(f"Shift X={coreg.x_shift_px:.2f}px, Y={coreg.y_shift_px:.2f}px "
+                         f"not applied: reliability {reliability:.0f}% "
+                         f"(below {MIN_RELIABILITY:.0f}%)"),
             )
 
         if (abs(coreg.x_shift_px or 0) < 0.01

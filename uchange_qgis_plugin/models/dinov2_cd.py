@@ -133,13 +133,38 @@ def _conv_bn_relu(in_ch, out_ch, kernel=3, padding=1):
     )
 
 
+def shift_tolerant_diff(fa, fb, r=1):
+    """|A - B| with each patch compared at its best-matching offset within +-r patches.
+
+    Tolerates misregistration and off-nadir lean of up to r patches; averaged over
+    both directions. fa, fb: (B, C, H, W).
+    """
+    def one(src, dst):
+        h, w = dst.shape[2:]
+        padded = F.pad(src, (r, r, r, r), mode="replicate")
+        best = best_d = None
+        for dy in range(2 * r + 1):
+            for dx in range(2 * r + 1):
+                cand = padded[:, :, dy:dy + h, dx:dx + w]
+                d = (cand - dst).pow(2).sum(1, keepdim=True)
+                if best is None:
+                    best, best_d = cand, d
+                else:
+                    closer = d < best_d
+                    best = torch.where(closer, cand, best)
+                    best_d = torch.minimum(d, best_d)
+        return (best - dst).abs()
+    return 0.5 * (one(fa, fb) + one(fb, fa))
+
+
 class MultiLayerChangeDecoder(nn.Module):
     def __init__(self, in_dim=768, hidden_dim=256, out_size=518,
-                 patch_grid=37, num_layers=4):
+                 patch_grid=37, num_layers=4, diff="abs"):
         super().__init__()
         self.patch_grid = patch_grid
         self.out_size = out_size
         self.num_layers = num_layers
+        self.diff = diff
 
         self.layer_norms = nn.ModuleList([nn.LayerNorm(in_dim) for _ in range(num_layers)])
         self.layer_projs = nn.ModuleList([
@@ -176,7 +201,7 @@ class MultiLayerChangeDecoder(nn.Module):
             fb_normed = self.layer_norms[i](feats_b[i])
             fa = fa_normed.permute(0, 2, 1).reshape(B, -1, H, W)
             fb = fb_normed.permute(0, 2, 1).reshape(B, -1, H, W)
-            diff = torch.abs(fa - fb)
+            diff = shift_tolerant_diff(fa, fb) if self.diff == "shift" else torch.abs(fa - fb)
             x = torch.cat([fa, fb, diff], dim=1)
             projected.append(self.layer_projs[i](x))
 
@@ -225,10 +250,11 @@ class DINOv2ChangeDetector(nn.Module):
 
     def forward(self, img_a, img_b):
         out_size = img_a.shape[2:]
+        b = img_a.shape[0]
         with torch.no_grad():
-            feats_a = self.extract_multilayer_features(img_a)
-            feats_b = self.extract_multilayer_features(img_b)
-        return self.decoder(feats_a, feats_b, out_size=out_size)
+            # Both dates in one backbone call: better GPU use at small batches.
+            feats = self.extract_multilayer_features(torch.cat([img_a, img_b]))
+        return self.decoder([f[:b] for f in feats], [f[b:] for f in feats], out_size=out_size)
 
     def train(self, mode=True):
         super().train(mode)

@@ -337,11 +337,12 @@ class MultiLayerChangeDecoder(nn.Module):
     (FPN-style) to produce a high-resolution change prediction."""
 
     def __init__(self, in_dim=768, hidden_dim=256, out_size=518, patch_grid=37,
-                 num_layers=4):
+                 num_layers=4, diff="abs"):
         super().__init__()
         self.patch_grid = patch_grid
         self.out_size = out_size
         self.num_layers = num_layers
+        self.diff = diff    # "abs": |A-B|; "shift": best match within +-1 patch (lean, misregistration)
 
         # Per-layer: normalize features then project [A, B, |A-B|] from 3*in_dim to hidden_dim
         self.layer_norms = nn.ModuleList([nn.LayerNorm(in_dim) for _ in range(num_layers)])
@@ -396,7 +397,11 @@ class MultiLayerChangeDecoder(nn.Module):
             fb_normed = self.layer_norms[i](feats_b[i])
             fa = fa_normed.permute(0, 2, 1).reshape(B, -1, H, W)
             fb = fb_normed.permute(0, 2, 1).reshape(B, -1, H, W)
-            diff = torch.abs(fa - fb)
+            if self.diff == "shift":
+                from uchange_qgis_plugin.models.dinov2_cd import shift_tolerant_diff
+                diff = shift_tolerant_diff(fa, fb)
+            else:
+                diff = torch.abs(fa - fb)
             x = torch.cat([fa, fb, diff], dim=1)
             projected.append(self.layer_projs[i](x))
 
@@ -879,6 +884,9 @@ def main():
     parser.add_argument("--resume", type=str, default=None,
                         help="Path to decoder checkpoint to resume from")
     parser.add_argument("--eval-every", type=int, default=5)
+    parser.add_argument("--diff", choices=["abs", "shift"], default="abs",
+                        help="FPN decoder's difference features: |A-B| or shift-tolerant "
+                             "(best match within +-1 patch)")
     parser.add_argument("--decoder", choices=["fpn", "ban"], default="fpn",
                         help="Decoder type: fpn (multi-layer FPN) or ban (Bitemporal Adapter Network)")
     parser.add_argument("--fda-target", type=str, default=None,
@@ -1059,6 +1067,7 @@ def main():
                 out_size=args.crop_size,
                 patch_grid=patch_grid,
                 num_layers=4,
+                diff=args.diff,
             )
         model = DINOv2ChangeDetector(
             backbone, decoder, layer_indices, family=cfg["family"],
@@ -1121,6 +1130,7 @@ def main():
                     "miou": miou,
                     "iou_unchanged": iou[0],
                     "iou_changed": iou[1],
+                    "diff": args.diff,
                 }, ckpt_path)
                 print(f"  Saved checkpoint: {ckpt_path}")
 
@@ -1133,6 +1143,7 @@ def main():
                         "miou": miou,
                         "iou_unchanged": iou[0],
                         "iou_changed": iou[1],
+                        "diff": args.diff,
                     }, best_path)
                     print(f"  *** New best mIoU: {best_miou:.4f} ***")
 

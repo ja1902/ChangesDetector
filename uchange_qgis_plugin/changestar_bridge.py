@@ -82,6 +82,57 @@ def prefetch_weights():
     return hf_hub_download(HF_REPO, cfg[_WEIGHT_KEY])
 
 
+# Global-attention blocks of the SAM ViT-L add a relative-position bias that
+# torchange builds for every query/key pair at once: at a 1024 px window that
+# is 16 heads x 4096^2 floats (1 GB) per block, and it keeps the attention off
+# the memory-efficient kernels (10 GB peak on a T4). Running the queries a
+# band of rows at a time gives the same result in a fraction of the memory.
+_BIAS_CHUNK_BYTES = 128 * 1024**2
+
+
+def _banded_rel_pos_attention(self, x):
+    import torch
+    import torch.nn.functional as F
+    from torchange.module.sam_vit import get_rel_pos
+
+    B, H, W, _ = x.shape
+    n = H * W
+    qkv = self.qkv(x).reshape(B, n, 3, self.num_heads, -1).permute(2, 0, 3, 1, 4)
+    q, k, v = qkv.reshape(3, B * self.num_heads, n, -1).unbind(0)
+    bh, _, dim = q.shape
+    Rh = get_rel_pos(H, H, self.rel_pos_h)                # (H, H, dim)
+    Rw = get_rel_pos(W, W, self.rel_pos_w)                # (W, W, dim)
+    rows = max(1, int(_BIAS_CHUNK_BYTES // (bh * W * n * q.element_size())))
+    out = []
+    for r0 in range(0, H, rows):
+        r1 = min(H, r0 + rows)
+        qc = q[:, r0 * W:r1 * W]
+        r_q = qc.reshape(bh, r1 - r0, W, dim)
+        rel_h = torch.einsum("bhwc,hkc->bhwk", r_q, Rh[r0:r1])
+        rel_w = torch.einsum("bhwc,wkc->bhwk", r_q, Rw)
+        bias = (rel_h[:, :, :, :, None] + rel_w[:, :, :, None, :]).reshape(bh, -1, n)
+        out.append(F.scaled_dot_product_attention(qc, k, v, attn_mask=bias))
+        del bias, rel_h, rel_w
+    x = torch.cat(out, 1)
+    x = x.view(B, self.num_heads, H, W, -1).permute(0, 2, 3, 1, 4).reshape(B, H, W, -1)
+    return self.proj(x)
+
+
+def _use_banded_attention(model):
+    import types
+    from torchange.module.sam_vit import Attention
+    for m in model.modules():
+        if isinstance(m, Attention) and m.use_rel_pos:
+            plain = m.forward
+
+            def forward(self, x, _plain=plain):
+                # Window blocks (14 x 14 tokens) are small: keep torchange's code.
+                if self.training or x.shape[1] * x.shape[2] <= 1024:
+                    return _plain(x)
+                return _banded_rel_pos_attention(self, x)
+            m.forward = types.MethodType(forward, m)
+
+
 def build_changestar(device):
     try:
         c2 = import_changen2()
@@ -96,6 +147,12 @@ def build_changestar(device):
         raise
     for p in model.parameters():
         p.requires_grad = False
+    # float16 on GPU, as for the DINOv2 model: half the weight memory (0.6 GB
+    # instead of 1.2 GB) and ~1.8x faster on a T4; 0.002% of pixels change side
+    # of 0.5 against float32. CPU stays float32.
+    if device.type == "cuda":
+        model.half()
+    _use_banded_attention(model)
     return model, "Model: Changen2 ChangeStar ViT-L (EVER-Z/Changen2-ChangeStar1x256, CC BY-NC-SA 4.0)"
 
 
@@ -121,6 +178,9 @@ def changestar_probs(model, pre_img, post_img, device, window=1024, overlap=128,
     coords = [(y, x) for y in ys for x in xs]
     acc = np.zeros((h, w), dtype=np.float32)
     cnt = np.zeros((h, w), dtype=np.float32)
+    # float16 weights (build_changestar on GPU) run under float16 autocast, which
+    # keeps softmax and layer norms in float32.
+    half = next(model.parameters()).dtype == torch.float16
     for i, (y, x) in enumerate(coords):
         if cancel_fn and cancel_fn():
             return None
@@ -132,7 +192,7 @@ def changestar_probs(model, pre_img, post_img, device, window=1024, overlap=128,
         ph, pw = (-th) % 32, (-tw) % 32
         if ph or pw:
             t = F.pad(t, (0, pw, 0, ph), mode="reflect")
-        with torch.inference_mode():
+        with torch.inference_mode(), torch.autocast("cuda", dtype=torch.float16, enabled=half):
             out = model(t)["change_prediction"][0, 0, :th, :tw].float().cpu().numpy()
         acc[y:y + th, x:x + tw] += out
         cnt[y:y + th, x:x + tw] += 1.0

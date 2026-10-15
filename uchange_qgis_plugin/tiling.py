@@ -107,35 +107,56 @@ def _extract_tile(img, y0, x0, y1, x1, tile_size):
     return tile, th, tw
 
 
+# Larger batches do not run faster: on a T4 the DINOv2 model is GPU-bound from
+# 8 tiles of 252 px (15.9 ms/tile at 8, 15.2 at 32) while its memory grows
+# linearly (0.8 GB at 8, 3.2 GB at 32).
+MAX_BATCH = 8
+
+# PyTorch memory this process may use on the GPU (bytes), None = all that is
+# free. Set by set_vram_limit (detect_changes.py --max-vram).
+_vram_limit = None
+
+
+def set_vram_limit(mb, device):
+    """Keep this process's PyTorch GPU memory under `mb` MB (excluding the CUDA context)."""
+    global _vram_limit
+    import torch
+    index = device.index if device.index is not None else torch.cuda.current_device()
+    total = torch.cuda.get_device_properties(index).total_memory
+    _vram_limit = int(mb * 1024**2)
+    torch.cuda.set_per_process_memory_fraction(min(1.0, _vram_limit / total), index)
+
+
+def gpu_budget(device):
+    """Bytes of GPU memory still available to this process."""
+    import torch
+    free = torch.cuda.mem_get_info(device.index or 0)[0]
+    if _vram_limit is not None:
+        free = min(free, _vram_limit - torch.cuda.memory_allocated(device))
+    return max(0, free)
+
+
 def _estimate_batch_size(device, tile_size, scd_mode=False, model=None):
     if device.type != "cuda":
         return 4
 
-    import torch
-    free_mem = torch.cuda.mem_get_info(device.index or 0)[0]
-
     is_vit = model is not None and hasattr(model, 'extract_multilayer_features')
 
     if is_vit:
-        patch_size = getattr(model.backbone.patch_embed, 'patch_size', 14)
-        seq_len = (tile_size // patch_size) ** 2
-        depth = len(list(model.backbone.blocks))
-        num_heads = 12
-        if hasattr(model.backbone.blocks[0], 'attn'):
-            num_heads = model.backbone.blocks[0].attn.num_heads
-        # Attention scores dominate: num_heads * seq_len^2 * 2 bytes (fp16) per layer
-        # Plus FFN, residuals, decoder features — use 4x multiplier on attention
-        bytes_per_tile = num_heads * seq_len * seq_len * 2 * depth * 4
-        model_overhead = 512 * 1024**2
+        # Measured on the DINOv2 ViT-B change model in float16: ~100 MB per
+        # 252 px tile, nearly all of it decoder feature maps (they scale with
+        # the tile's area; attention runs in memory-efficient kernels).
+        bytes_per_tile = 100 * 1024**2 * (tile_size / 252.0) ** 2 * 1.25
+        model_overhead = 64 * 1024**2
     else:
         bytes_per_tile = tile_size * tile_size * 3 * 4
         model_overhead = (2.5 if scd_mode else 1.5) * 1024**3
         activation_multiplier = 16 if scd_mode else 12
         bytes_per_tile *= activation_multiplier
 
-    available = max(0, free_mem - model_overhead)
+    available = max(0, gpu_budget(device) - model_overhead)
     batch = max(1, int(available / bytes_per_tile))
-    return min(batch, 32)
+    return min(batch, MAX_BATCH)
 
 
 def _prepare_batch(tiles_slice, pre_img, post_img, tile_size, grayscale=False,
@@ -183,7 +204,20 @@ def _change_probs(logits, logit_adjust):
     return torch.softmax(logits, dim=1)[:, 1]
 
 
-def _run_batch(model, pre_batch, post_batch, device, tta=False, logit_adjust=False):
+def _flip_average(model, pre, post, logits):
+    """Mean of `logits` (the unflipped pass) and the three flipped passes."""
+    import torch
+    for dims in _TTA_FLIPS[1:]:
+        out = model(torch.flip(pre, dims), torch.flip(post, dims))
+        logits = logits + torch.flip(out.float(), dims)
+    return logits / len(_TTA_FLIPS)
+
+
+def _run_batch(model, pre_batch, post_batch, device, tta=False, logit_adjust=False,
+               tta_gate=None):
+    """(B, H, W) change probability. With tta, `tta_gate` (a probability) limits
+    flip averaging to tiles where some pixel reaches it in the unflipped pass;
+    the other tiles keep their single-pass result."""
     import torch
 
     pre = torch.from_numpy(pre_batch).float()
@@ -208,13 +242,15 @@ def _run_batch(model, pre_batch, post_batch, device, tta=False, logit_adjust=Fal
             sem_to = output['seg_logits_to'].float().argmax(dim=1).cpu().numpy()
             return {'binary_probs': binary_probs, 'semantic_from': sem_from, 'semantic_to': sem_to}
 
-        if tta:
+        if tta and tta_gate is None:
             # Average the logits over the four flips (the evaluated pipeline).
-            logits = output.float()
-            for dims in _TTA_FLIPS[1:]:
-                out = model(torch.flip(pre, dims), torch.flip(post, dims))
-                logits = logits + torch.flip(out.float(), dims)
-            output = logits / len(_TTA_FLIPS)
+            output = _flip_average(model, pre, post, output.float())
+        elif tta:
+            output = output.float()
+            probs = _change_probs(output, logit_adjust)
+            todo = (probs.flatten(1).amax(1) >= tta_gate).nonzero().flatten()
+            if len(todo):
+                output[todo] = _flip_average(model, pre[todo], post[todo], output[todo])
 
         probs = _change_probs(output, logit_adjust).cpu().numpy()
 
@@ -223,7 +259,7 @@ def _run_batch(model, pre_batch, post_batch, device, tta=False, logit_adjust=Fal
 
 def run_tiled_inference(model, pre_img, post_img, tile_size, overlap, device,
                         progress_fn=None, cancel_fn=None, grayscale=False,
-                        hist_match=False, tta=False, logit_adjust=False):
+                        hist_match=False, tta=False, logit_adjust=False, tta_gate=None):
     h, w = pre_img.shape[:2]
     scd_mode = getattr(model, 'is_scd', False)
 
@@ -261,7 +297,7 @@ def run_tiled_inference(model, pre_img, post_img, tile_size, overlap, device,
 
                 try:
                     result = _run_batch(model, pre_batch, post_batch, device,
-                                        tta=tta, logit_adjust=logit_adjust)
+                                        tta=tta, logit_adjust=logit_adjust, tta_gate=tta_gate)
                 except RuntimeError as e:
                     if "out of memory" not in str(e).lower() or batch_size <= 1:
                         raise
@@ -325,7 +361,7 @@ def _tile_rows(tiles):
 
 def run_scaled_inference(model, pre_img, post_img, factor, tile_size, overlap, device,
                          progress_fn=None, cancel_fn=None, grayscale=False,
-                         hist_match=False, tta=False, logit_adjust=False):
+                         hist_match=False, tta=False, logit_adjust=False, tta_gate=None):
     """Binary change probability at the input resolution, inferred at x`factor`.
 
     Gives the result of
@@ -390,7 +426,7 @@ def run_scaled_inference(model, pre_img, post_img, factor, tile_size, overlap, d
                     future = prepare(start + n, batch_size)
                 try:
                     probs = _run_batch(model, pre_batch, post_batch, device,
-                                       tta=tta, logit_adjust=logit_adjust)
+                                       tta=tta, logit_adjust=logit_adjust, tta_gate=tta_gate)
                 except RuntimeError as e:
                     if "out of memory" not in str(e).lower() or batch_size <= 1:
                         raise

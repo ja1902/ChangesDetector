@@ -6,11 +6,12 @@ _PROJECT_ROOT = os.path.normpath(os.path.join(_PLUGIN_DIR, ".."))
 # Inference presets: the exact pipeline each model was evaluated with in
 # research/RESULTS_2026-09.md, so its recommended threshold means the same
 # thing here. Thresholds are on logit-adjusted probabilities and were chosen on
-# validation data from unfamiliar imagery (EGY-BCD / S2Looking val), not LEVIR.
+# validation data from unfamiliar imagery (e.g. S2Looking val), not LEVIR.
 #   scale         upsampling applied before tiling (DINOv2 was run at 1.4x)
 #   tta           average the four flips
 #   logit_adjust  remove the LEVIR change prior (pi = 0.0584) from the logits
 #   target_gsd    resample coarser imagery up to this pixel size (metres)
+#   tta_gate      flip-average only tiles reaching this single-pass probability
 PRESETS = {
     "synthetic": {
         "tile_size": 252, "overlap": 64, "scale": 1.4, "tta": True,
@@ -21,6 +22,11 @@ PRESETS = {
         # "fast_threshold" yet: 0.70 is reused until one is measured
         # (scripts/e2026/e10_fast_mode.py).
         "fast_mode": True,
+        # Flip averaging only on tiles whose single pass reaches 0.5 somewhere:
+        # same masks as averaging every tile on S2Looking and LEVIR
+        # (0.001% of pixels differ), 38% less inference time on GPU
+        # (benchmarks/bench.py).
+        "tta_gate": 0.5,
     },
     "ensemble": {
         "tile_size": 252, "overlap": 64, "scale": 1.4, "tta": True,

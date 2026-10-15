@@ -130,23 +130,15 @@ def save_comparison(path, panels):
             import cv2
             p = cv2.resize(p, size, interpolation=cv2.INTER_AREA)
         small.append(np.repeat(p[:, :, None], 3, axis=2) if p.ndim == 2 else p)
-    Image.fromarray(np.concatenate(small, axis=1)).save(path)
+    # Light compression: 3x faster to write than PIL's default, ~10% larger.
+    Image.fromarray(np.concatenate(small, axis=1)).save(path, compress_level=1)
 
 
-def label_changes(args, model, head, device, binary_mask, before_img, after_img,
-                  geo_info, lc_factor):
-    """Name every change blob: majority land cover before and after.
-
-    Land cover runs at the pixel-size-corrected resolution (without the change
-    model's extra upscaling), which is how the land-cover head was evaluated.
-    """
-    from collections import Counter
-
+def landcover_labels(model, head, device, binary_mask, before_img, after_img, lc_factor):
+    """Change blobs and their (from, to) land cover: (blob ids, from_cls, to_cls)."""
     from PIL import Image
-    from uchange_qgis_plugin.landcover import (
-        LANDCOVER_CLASSES, LANDCOVER_PALETTE, label_blobs, predict_landcover)
-    from uchange_qgis_plugin.raster_io import (
-        _smooth_mask, polygonize_labelled_changes, save_semantic_geotiff)
+    from uchange_qgis_plugin.landcover import label_blobs, predict_landcover
+    from uchange_qgis_plugin.raster_io import _smooth_mask
     from uchange_qgis_plugin.resolution import resample_rgb
 
     h, w = binary_mask.shape
@@ -159,8 +151,23 @@ def label_changes(args, model, head, device, binary_mask, before_img, after_img,
         if lc.shape != (h, w):
             lc = np.array(Image.fromarray(lc).resize((w, h), Image.NEAREST))
         maps.append(lc)
+    return label_blobs(_smooth_mask(binary_mask), *maps)
 
-    blobs, from_cls, to_cls = label_blobs(_smooth_mask(binary_mask), *maps)
+
+def label_changes(args, model, head, device, binary_mask, before_img, after_img,
+                  geo_info, lc_factor):
+    """Name every change blob: majority land cover before and after.
+
+    Land cover runs at the pixel-size-corrected resolution (without the change
+    model's extra upscaling), which is how the land-cover head was evaluated.
+    """
+    from collections import Counter
+
+    from uchange_qgis_plugin.landcover import LANDCOVER_CLASSES, LANDCOVER_PALETTE
+    from uchange_qgis_plugin.raster_io import polygonize_labelled_changes, save_semantic_geotiff
+
+    blobs, from_cls, to_cls = landcover_labels(model, head, device, binary_mask,
+                                               before_img, after_img, lc_factor)
     gt, proj = geo_info["geotransform"], geo_info["projection"]
     out = {"mode": "labelled"}
     for tag, cls in (("from", from_cls), ("to", to_cls)):
@@ -204,6 +211,9 @@ def build_parser():
     parser.add_argument("--overlap", type=int, default=None,
                         help="Tile overlap in pixels (default 0, or the preset's)")
     parser.add_argument("--device", default="auto")
+    parser.add_argument("--max-vram", type=int, default=None, metavar="MB",
+                        help="Use at most this much GPU memory (MB, plus ~0.3 GB for the "
+                             "CUDA runtime itself); for small or shared GPUs")
     parser.add_argument("--grayscale", action="store_true",
                         help="Convert inputs to grayscale (for grayscale-trained models)")
     parser.add_argument("--histogram-match", action="store_true",
@@ -236,6 +246,10 @@ def build_parser():
                         help="Average predictions over horizontal/vertical flips")
     parser.add_argument("--no-tta", dest="tta", action="store_false",
                         help="No flip averaging, even if the preset uses it")
+    parser.add_argument("--tta-gate", type=float, default=None, metavar="P",
+                        help="Flip-average only tiles where some pixel's single-pass change "
+                             "probability reaches P (faster; tiles with no likely change keep "
+                             "the single pass; default: the preset's, 0 = every tile)")
     parser.add_argument("--fast", action="store_true",
                         help="Fast mode: no flip averaging (about 4x faster, slightly less accurate). "
                              "Keeps the preset's upscaling (add --scale 1.0 to drop it too) and uses "
@@ -273,32 +287,20 @@ def resolve_settings(args):
 
     preset = PRESETS.get(args.preset, {}) if args.preset else {}
     for key, fallback in (("scale", 1.0), ("tta", False), ("logit_adjust", False),
-                          ("target_gsd", 0.0), ("tile_size", 256), ("overlap", 0),
+                          ("target_gsd", 0.0), ("tile_size", 256), ("overlap", 0), ("tta_gate", 0.0),
                           ("core_threshold", 0.0), ("min_blob_m2", 0.0), ("min_width_m", 0.0)):
         if getattr(args, key) is None:
             setattr(args, key, preset.get(key, fallback))
     if args.fast:
         args.tta = False
+    if args.no_cleanup:
+        args.core_threshold = args.min_blob_m2 = args.min_width_m = 0.0
 
     return preset
 
 
-def main():
-    global _json_progress
-
-    args = build_parser().parse_args()
-    preset = resolve_settings(args)
-
-    _json_progress = args.json_progress
-
-    # Labelled change runs the binary pipeline, then names each change blob.
-    labelled = args.model_type == "dinov2_lc"
-    if labelled:
-        args.mode = "binary"
-
-    if args.no_cleanup:
-        args.core_threshold = args.min_blob_m2 = args.min_width_m = 0.0
-
+def resolve_threshold(args, preset):
+    """Set args.threshold (float) and args.auto_threshold from --threshold."""
     if args.threshold == "auto" and "threshold" in preset:
         args.auto_threshold = False
         args.threshold = preset_threshold(preset, args.tta)
@@ -316,6 +318,55 @@ def main():
         if not 0.0 <= args.threshold <= 1.0:
             _log(f"WARNING: threshold {args.threshold} outside [0, 1], clamping")
             args.threshold = max(0.0, min(1.0, args.threshold))
+    # The gate is only safe well below the threshold: a pixel just under it in
+    # the single pass can still cross the threshold after flip averaging.
+    if args.tta_gate and not args.auto_threshold and args.threshold < args.tta_gate + 0.1:
+        _log(f"Flip averaging on every tile (threshold {args.threshold:.2f} is close to "
+             f"the {args.tta_gate:.2f} tile gate)")
+        args.tta_gate = 0.0
+    if args.tta_gate and args.auto_threshold:
+        args.tta_gate = 0.0
+
+
+def infer_probability(args, model, cs_model, before_img, after_img, factor, device,
+                      progress_fn=None):
+    """Binary mode: change probability at the input resolution."""
+    from uchange_qgis_plugin.resolution import resample_prob, resample_rgb
+    from uchange_qgis_plugin.tiling import run_scaled_inference
+
+    tile_kw = dict(tile_size=args.tile_size, overlap=args.overlap, device=device,
+                   grayscale=args.grayscale, progress_fn=progress_fn,
+                   hist_match=args.histogram_match, tta=args.tta,
+                   logit_adjust=args.logit_adjust, tta_gate=args.tta_gate or None)
+    # A strip at a time: the upsampled images never sit in memory whole.
+    result = run_scaled_inference(model, before_img, after_img, factor, **tile_kw)
+    if cs_model is not None:
+        # ChangeStar was evaluated at native scale: only the GSD correction applies.
+        from uchange_qgis_plugin.changestar_bridge import changestar_probs
+        cs_factor = factor / args.scale
+        _log("Running Changen2 ChangeStar ViT-L...")
+        p_cs = changestar_probs(cs_model, resample_rgb(before_img, cs_factor),
+                                resample_rgb(after_img, cs_factor), device)
+        p_cs = resample_prob(p_cs, before_img.shape[:2])
+        # Geometric mean: a pixel is change only if both models lean that way.
+        result = np.sqrt(np.clip(result, 0, 1) * np.clip(p_cs, 0, 1)).astype(np.float32)
+    return result
+
+
+def main():
+    global _json_progress
+
+    args = build_parser().parse_args()
+    preset = resolve_settings(args)
+
+    _json_progress = args.json_progress
+
+    # Labelled change runs the binary pipeline, then names each change blob.
+    labelled = args.model_type == "dinov2_lc"
+    if labelled:
+        args.mode = "binary"
+
+    resolve_threshold(args, preset)
 
     for path, label in [(args.before, "Before image"), (args.after, "After image")]:
         if not os.path.isfile(path):
@@ -332,6 +383,10 @@ def main():
     else:
         device = torch.device(args.device)
     _emit({"type": "device", "device": str(device)})
+    if args.max_vram and device.type == "cuda":
+        from uchange_qgis_plugin.tiling import set_vram_limit
+        set_vram_limit(args.max_vram, device)
+        _log(f"GPU memory limit: {args.max_vram} MB")
 
     from uchange_qgis_plugin.model_bridge import build_model
 
@@ -406,8 +461,10 @@ def main():
             else:
                 msg = coreg_result.message.rstrip('.')
                 _log(f"  {msg}. Using original images.")
-        except ImportError:
-            _log("  AROSICS not available. Skipping co-registration.")
+        except ImportError as e:
+            # Name the missing module: AROSICS itself may be installed while
+            # one of its dependencies is not.
+            _log(f"  AROSICS not available ({e}). Skipping co-registration.")
         except Exception as e:
             _log(f"  Co-registration failed: {e}. Using original images.")
     _progress(15)
@@ -430,7 +487,7 @@ def main():
     _log(f"Tile size: {args.tile_size}, overlap: {args.overlap}, threshold: {thresh_str}")
 
     # Resolution: the model's own scale, times an upsampling for coarse imagery.
-    from uchange_qgis_plugin.resolution import working_factor, resample_rgb, resample_prob
+    from uchange_qgis_plugin.resolution import working_factor
     factor, gsd, gsd_note = (1.0, None, "")
     if args.mode != "semantic":
         factor, gsd, gsd_note = working_factor(before_geo or after_geo, args.target_gsd,
@@ -442,12 +499,15 @@ def main():
         if abs(factor - 1.0) > 1e-6:
             _log(f"Inference at x{factor:.2f} ({int(w * factor)}x{int(h * factor)} px)")
         if args.tta or args.logit_adjust:
-            _log(f"Flip averaging: {'on' if args.tta else 'off'}, "
+            tta = "off"
+            if args.tta:
+                tta = (f"on tiles reaching {args.tta_gate:.2f}" if args.tta_gate else "on")
+            _log(f"Flip averaging: {tta}, "
                  f"logit adjustment: {'on' if args.logit_adjust else 'off'}")
 
     os.makedirs(args.output, exist_ok=True)
 
-    from uchange_qgis_plugin.tiling import run_scaled_inference, run_tiled_inference
+    from uchange_qgis_plugin.tiling import run_tiled_inference
 
     t0 = time.time()
     _log(f"Running {'SCD' if args.mode == 'semantic' else 'binary'} tiled inference...")
@@ -460,29 +520,26 @@ def main():
         _log("Histogram matching: per-tile (after → before)")
 
     try:
-        tile_kw = dict(tile_size=args.tile_size, overlap=args.overlap, device=device,
-                       grayscale=args.grayscale, progress_fn=progress_fn,
-                       hist_match=args.histogram_match, tta=args.tta,
-                       logit_adjust=args.logit_adjust)
         if args.mode == "semantic":
-            result = run_tiled_inference(model, before_img, after_img, **tile_kw)
+            result = run_tiled_inference(
+                model, before_img, after_img, tile_size=args.tile_size, overlap=args.overlap,
+                device=device, grayscale=args.grayscale, progress_fn=progress_fn,
+                hist_match=args.histogram_match, tta=args.tta, logit_adjust=args.logit_adjust)
         else:
-            # A strip at a time: the upsampled images never sit in memory whole.
-            result = run_scaled_inference(model, before_img, after_img, factor, **tile_kw)
-        if cs_model is not None:
-            # ChangeStar was evaluated at native scale: only the GSD correction applies.
-            from uchange_qgis_plugin.changestar_bridge import changestar_probs
-            cs_factor = factor / args.scale
-            _log("Running Changen2 ChangeStar ViT-L...")
-            p_cs = changestar_probs(cs_model, resample_rgb(before_img, cs_factor),
-                                    resample_rgb(after_img, cs_factor), device)
-            p_cs = resample_prob(p_cs, (h, w))
-            # Geometric mean: a pixel is change only if both models lean that way.
-            result = np.sqrt(np.clip(result, 0, 1) * np.clip(p_cs, 0, 1)).astype(np.float32)
+            result = infer_probability(args, model, cs_model, before_img, after_img, factor,
+                                       device, progress_fn)
             del cs_model
     except RuntimeError as e:
+        if "out of memory" in str(e).lower() and args.max_vram:
+            _emit({"type": "error", "message": (
+                f"GPU out of memory under --max-vram {args.max_vram}: the DINOv2 models need "
+                "at least about 400 MB (weights plus one tile).")})
+            sys.exit(1)
         if "out of memory" in str(e).lower():
-            _emit({"type": "error", "message": f"GPU out of memory. Try --tile-size 128 or --device cpu."})
+            _emit({"type": "error", "message": (
+                "GPU out of memory. Close other programs using the GPU, or run on the CPU "
+                "(--device cpu). The Changen2 ensemble needs about 3.5 GB; the other models "
+                "run in under 1 GB.")})
             sys.exit(1)
         raise
     elapsed = time.time() - t0
@@ -621,7 +678,7 @@ def main():
         for y in range(0, prob_map.shape[0], 1024):     # no full-size float temporaries
             prob_vis[y:y + 1024] = (prob_map[y:y + 1024] * 255).clip(0, 255)
         prob_path = os.path.join(args.output, "probability.png")
-        Image.fromarray(prob_vis).save(prob_path)
+        Image.fromarray(prob_vis).save(prob_path, compress_level=1)
         _log(f"Saved: {prob_path}")
 
         _progress(100)

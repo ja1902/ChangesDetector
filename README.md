@@ -4,6 +4,23 @@ A research project exploring automated change detection between georeferenced sa
 
 ## What changed (v0.8)
 
+### Less GPU memory and RAM, faster (v0.8.3)
+
+Same results as v0.8.2 (on 400 labelled test pairs from S2Looking and LEVIR-CD, scores are identical and 0.001% of pixels change side), measured on a T4:
+
+| | v0.8.2 | v0.8.3 |
+|---|---|---|
+| Recommended DINOv2 model, 4096 x 4096 px: GPU memory | 4.3 GB | 1.3 GB |
+| same, inference time | 1x | 1.6x faster |
+| Changen2 ensemble, 2048 x 2048 px: GPU memory | 3.5 GB | 3.0 GB |
+| same, inference time | 1x | 1.3x faster |
+| 64-megapixel scene: peak RAM | 3.0 GB | 0.9 GB |
+
+- Flip averaging runs only on tiles where the first pass finds a likely change (probability 0.5 or more); the rest keep the single pass. `--tta-gate 0` averages every tile as before.
+- The DINOv2 models now run on GPUs with 1 GB of memory: the batch size follows the free memory (8 tiles at most, where the GPU stops getting faster) and halves if the GPU runs out. The Changen2 ensemble needs about 3.5 GB: it now runs in float16, and its attention no longer peaks at ~10 GB.
+- **GPU memory limit** in the dialog (CLI: `--max-vram MB`) for small or shared GPUs; same results, a little slower under a tight limit.
+- Large rasters are processed one strip at a time, and the comparison preview is capped at 2048 px.
+
 ### Labelled change: what changed into what
 
 Semantic mode has a new recommended model, **DINOv2 ViT-B + land cover, from -> to**. The v0.7 DINOv2 model finds the changes; a land-cover head on the same frozen backbone (trained on OpenEarthMap, 44 countries, plus SECOND) classifies each date. Every change polygon gets one before class and one after class (the majority inside it) and is written to a GeoPackage with the fields `from_class`, `to_class`, `change` (e.g. "farmland -> building") and `area`. Classes: bare ground, grass / low vegetation, paved / road, trees, water, farmland, building. The layer is coloured by what each area became.
@@ -19,7 +36,7 @@ Changes are found by the building-focused v0.7 model, so this mode suits buildin
 
 ### Fast mode
 
-A **Fast mode** checkbox (CLI: `--fast`) for the recommended binary and labelled-change models skips flip averaging: about 4x faster, slightly less accurate. It keeps the 1.4x upscaling (`--scale 1.0` drops that too; `--no-tta` / `--tta` set flip averaging directly).
+A **Fast mode** checkbox (CLI: `--fast`) for the recommended binary and labelled-change models skips flip averaging: about 2x faster, slightly less accurate. It keeps the 1.4x upscaling (`--scale 1.0` drops that too; `--no-tta` / `--tta` set flip averaging directly).
 
 ### Models dropped
 
@@ -41,11 +58,11 @@ v0.7 targets three problems: working on new regions, sensors and resolutions wit
 
 Same architecture and file format as the v0.6 DINOv2 model, but the decoder is trained on [Changen2](https://github.com/Z-Zheng/pytorch-change-models) synthetic change pairs plus LEVIR-CD (`dinov2_vitb14_c2s1_levir.pth`). IoU on test sets, with each model's threshold picked on a *different* unseen dataset (the fair setting for new imagery; v0.6's own auto-threshold scored lower, e.g. 0.20 on S2Looking):
 
-| IoU | S2Looking | EGY-BCD | LEVIR-CD |
-|---|---|---|---|
-| v0.6 DINOv2 (generalizable) | 0.27 | 0.43 | 0.84 |
-| **v0.7 DINOv2 + synthetic** | **0.35** | **0.55** | 0.76-0.80 |
-| v0.7 Changen2 ViT-L + DINOv2 (optional) | **0.40** | 0.53 | 0.80 |
+| IoU | S2Looking | LEVIR-CD |
+|---|---|---|
+| v0.6 DINOv2 (generalizable) | 0.27 | 0.84 |
+| **v0.7 DINOv2 + synthetic** | **0.35** | 0.76-0.80 |
+| v0.7 Changen2 ViT-L + DINOv2 (optional) | **0.40** | 0.80 |
 
 At the same detection rate it raises about 4x fewer false alarms than v0.6 on imagery of the same place seen from different angles (SpaceNet MVOI). Trained on CC BY-NC-SA 4.0 data: research / non-commercial use.
 
@@ -303,7 +320,7 @@ python detect_changes.py --before before.tif --after after.tif --mode semantic  
 python detect_changes.py --before before.tif --after after.tif     --model-type dinov2 --weights dinov2_vitb14_levir.pth --threshold auto --output-gpkg changes.gpkg
 ```
 
-Options: `--mode binary|semantic`, `--model-type dinov2|ensemble|dinov2_lc`, `--weights path/to/weights.pth`, `--preset synthetic|ensemble`, `--threshold auto|0.3`, `--target-gsd 0.5`, `--min-area 20`, `--histogram-match`, `--tile-size 252`, `--overlap 64`, `--no-coreg`, `--max-shift 50`, `--coreg-window 1024`, `--device auto|cpu|gpu`
+Options: `--mode binary|semantic`, `--model-type dinov2|ensemble|dinov2_lc`, `--weights path/to/weights.pth`, `--preset synthetic|ensemble`, `--threshold auto|0.3`, `--target-gsd 0.5`, `--min-area 20`, `--histogram-match`, `--tile-size 252`, `--overlap 64`, `--no-coreg`, `--max-shift 50`, `--coreg-window 1024`, `--device auto|cpu|gpu`, `--max-vram 1024`, `--fast`, `--tta-gate 0.5`
 
 ### Training
 
@@ -335,8 +352,9 @@ The backbone stays frozen; only the decoder trains (~9M params, ~4GB VRAM).
 - Select "CPU" as the device, or install NVIDIA drivers + CUDA toolkit
 
 **GPU out of memory:**
-- Reduce tile size (e.g. `--tile-size 128`) or use `--device cpu`
-- The tiler automatically adjusts batch size and retries on OOM
+- Close other programs that use the GPU, or use `--device cpu`
+- The DINOv2 models need about 0.4 GB (plus ~0.3 GB for the driver), the Changen2 ensemble about 3.5 GB
+- The batch size follows the free GPU memory and halves if the GPU runs out; a "GPU memory limit" (`--max-vram`) below what the model needs fails with a clear message
 
 **Slow inference:**
 - Use GPU if available

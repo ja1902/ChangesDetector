@@ -105,12 +105,23 @@ def predict_landcover(model, head, img, device, window=448, overlap=96, batch=8,
             grow = need - acc.shape[1]
             acc = torch.cat([acc, torch.zeros(N_OEM, grow, pw)], 1)
             cnt = torch.cat([cnt, torch.zeros(1, grow, pw)], 1)
-        for s in range(0, len(xs), batch):
+        s = 0
+        while s < len(xs):
             chunk = xs[s:s + batch]
             t = np.stack([normalize_tile(img[y:y + win, x:x + win]) for x in chunk])
             t = torch.from_numpy(t).to(device=device, dtype=dtype)
-            feats = model.extract_multilayer_features(t)
-            prob = torch.softmax(head(feats, (win, win)).float(), 1).cpu()
+            try:
+                feats = model.extract_multilayer_features(t)
+                prob = torch.softmax(head(feats, (win, win)).float(), 1).cpu()
+            except RuntimeError as e:
+                # Small GPU: halve the batch and retry this chunk.
+                if "out of memory" not in str(e).lower() or batch <= 1:
+                    raise
+                del t
+                torch.cuda.empty_cache()
+                batch = max(1, batch // 2)
+                continue
+            s += len(chunk)
             for x, p in zip(chunk, prob):
                 acc[:, y - top:y - top + win, x:x + win] += p
                 cnt[:, y - top:y - top + win, x:x + win] += 1

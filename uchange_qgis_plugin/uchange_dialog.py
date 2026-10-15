@@ -60,7 +60,22 @@ class UChangeDialog(QDialog):
 
         self.device_selector = QComboBox()
         self.device_selector.addItems(["Auto (GPU if available)", "CPU", "GPU"])
+        self.device_selector.currentTextChanged.connect(self._on_device_changed)
         model_form.addRow("Device:", self.device_selector)
+
+        self.max_vram = QSpinBox()
+        self.max_vram.setRange(0, 65536)
+        self.max_vram.setSingleStep(256)
+        self.max_vram.setSuffix(" MB")
+        self.max_vram.setSpecialValueText("No limit")
+        self.max_vram.setValue(0)
+        self.max_vram.setToolTip(
+            "Most GPU memory the analysis may use, for small or shared GPUs.\n"
+            "Same results, a little slower under a tight limit.\n"
+            "The DINOv2 models need at least about 400 MB, the Changen2\n"
+            "ensemble about 3 GB (plus ~0.3 GB for the GPU driver itself)."
+        )
+        model_form.addRow("GPU memory limit:", self.max_vram)
 
         self._model_registry = MODEL_REGISTRY
         self.model_selector = QComboBox()
@@ -107,7 +122,7 @@ class UChangeDialog(QDialog):
         self.fast_mode_check = QCheckBox("Fast mode")
         self.fast_mode_check.setChecked(False)
         self.fast_mode_check.setToolTip(
-            "About 4x faster, slightly less accurate.\n"
+            "About 2x faster, slightly less accurate.\n"
             "Skips the flip averaging the recommended models normally use\n"
             "(each image is processed once instead of four times)."
         )
@@ -374,6 +389,14 @@ class UChangeDialog(QDialog):
 
         return result
 
+    def _on_device_changed(self, text):
+        # The memory limit only means something on a GPU.
+        on_gpu = text != "CPU"
+        self.max_vram.setVisible(on_gpu)
+        label = self.max_vram.parent().layout().labelForField(self.max_vram)
+        if label:
+            label.setVisible(on_gpu)
+
     def _resolve_device_str(self):
         device_text = self.device_selector.currentText()
         if device_text == "GPU":
@@ -409,12 +432,17 @@ class UChangeDialog(QDialog):
         except Exception as e:
             self._log(f"ERROR: {e}\n{traceback.format_exc()}")
             if "out of memory" in str(e).lower():
+                tips = ["- Closing other programs that use the GPU",
+                        "- Selecting CPU as the device"]
+                entry = self._model_registry.get(self.model_selector.currentText(), {})
+                if entry.get("type") == "ensemble":
+                    tips.insert(1, "- A DINOv2 model instead (Changen2 needs about 3.5 GB)")
+                if self.max_vram.value():
+                    tips.insert(0, "- Raising the GPU memory limit (at least about 400 MB)")
                 QMessageBox.critical(
                     self, "GPU Out of Memory",
                     "The GPU ran out of memory during inference.\n\n"
-                    "Try:\n"
-                    "- Reducing the tile size (e.g. 128)\n"
-                    "- Selecting CPU as the device",
+                    "Try:\n" + "\n".join(tips),
                 )
             else:
                 self.iface.messageBar().pushCritical("ChangeDetection", f"Inference failed: {e}")
@@ -459,6 +487,8 @@ class UChangeDialog(QDialog):
             "--overlap", str(self.overlap.value()),
             "--json-progress",
         ]
+        if self.max_vram.value() and device != "cpu":
+            cmd.extend(["--max-vram", str(self.max_vram.value())])
 
         if scd_mode and not self._is_labelled():
             cmd.extend(["--mode", "semantic"])
