@@ -26,8 +26,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 # full model file -> trained decoder in this folder
 MODELS = {
     "dinov2_vitb14_c2s1_levir.pth": "dinov2_vitb14_c2s1_levir.decoder.pth",
-    "dinov2_vitb14_levir.pth": "dinov2_vitb14_levir.decoder.pth",
-    "dinov2_vitb14_egybcd.pth": "dinov2_vitb14_egybcd.decoder.pth",
+    "dinov2_vitb14_finetuned.pth": "dinov2_vitb14_finetuned.decoder.pth",
 }
 # used as they are, no backbone needed
 HEADS = ["landcover_dinov2_vitb14_oem_second.pth"]

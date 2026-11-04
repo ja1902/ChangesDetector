@@ -22,6 +22,9 @@ from .model_registry import (
     LANDCOVER_CLASSES, LANDCOVER_PALETTE,
 )
 
+# Labelled-layer category for changes with the same land cover on both dates.
+_UNCLEAR = "unclear"
+
 
 class UChangeDialog(QDialog):
     def __init__(self, iface, parent=None):
@@ -72,8 +75,8 @@ class UChangeDialog(QDialog):
         self.max_vram.setToolTip(
             "Most GPU memory the analysis may use, for small or shared GPUs.\n"
             "Same results, a little slower under a tight limit.\n"
-            "The DINOv2 models need at least about 400 MB, the Changen2\n"
-            "ensemble about 3 GB (plus ~0.3 GB for the GPU driver itself)."
+            "The models need at least about 400 MB (plus ~0.3 GB for the\n"
+            "GPU driver itself)."
         )
         model_form.addRow("GPU memory limit:", self.max_vram)
 
@@ -127,6 +130,39 @@ class UChangeDialog(QDialog):
             "(each image is processed once instead of four times)."
         )
         proc_form.addRow("", self.fast_mode_check)
+
+        self.filter_check = QCheckBox("Filter false alarms (lean, shadows)")
+        self.filter_check.setChecked(True)
+        self.filter_check.setToolTip(
+            "Finds changes at a low threshold, then a classifier trained on\n"
+            "hand-checked changes drops those that look like building lean or\n"
+            "shadows; kept changes are outlined at the usual threshold.\n"
+            "On hand-checked squares the model had not seen: 69% of changes\n"
+            "found with 10 false alarms per km2. Untick to see everything the\n"
+            "model finds at its threshold (more changes, many more false alarms)."
+        )
+        self.filter_check.stateChanged.connect(self._on_filter_toggled)
+        self.filter_score = QDoubleSpinBox()
+        self.filter_score.setRange(0.05, 0.95)
+        self.filter_score.setSingleStep(0.05)
+        self.filter_score.setDecimals(2)
+        self.filter_score.setValue(0.46)
+        self.filter_score.setToolTip(
+            "Keep a change if the classifier judges it real with at least this\n"
+            "probability. Lower keeps more (more changes, more false alarms).")
+        filter_layout = QHBoxLayout()
+        filter_layout.setContentsMargins(0, 0, 0, 0)
+        filter_layout.addWidget(self.filter_check)
+        filter_layout.addStretch()
+        self.filter_score_label = QLabel("keep if real ≥")
+        filter_layout.addWidget(self.filter_score_label)
+        filter_layout.addWidget(self.filter_score)
+        self.filter_widget = QGroupBox()
+        self.filter_widget.setLayout(filter_layout)
+        self.filter_widget.setFlat(True)
+        self.filter_widget.setStyleSheet("QGroupBox { border: none; padding: 0; margin: 0; }")
+        proc_form.addRow("", self.filter_widget)
+        self._on_filter_toggled(self.filter_check.isChecked())
 
         self.tile_size = QSpinBox()
         self.tile_size.setRange(128, 1024)
@@ -254,8 +290,23 @@ class UChangeDialog(QDialog):
         preset = PRESETS.get(entry.get("preset"), {})
         return bool(preset.get("fast_mode")) and not self.custom_weights_check.isChecked()
 
+    def _uses_filter(self):
+        """The selected model's preset offers the false-alarm filter, and its weights exist."""
+        entry = self._model_registry.get(self.model_selector.currentText(), {})
+        bf = PRESETS.get(entry.get("preset"), {}).get("false_alarm_filter")
+        if not bf or self.custom_weights_check.isChecked():
+            return False
+        root = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+        return os.path.isfile(os.path.join(root, bf["file"]))
+
+    def _on_filter_toggled(self, state):
+        on = bool(state)
+        self.filter_score.setVisible(on)
+        self.filter_score_label.setVisible(on)
+
     def _on_mode_changed_visibility(self):
         self.fast_mode_check.setVisible(self._uses_preset())
+        self.filter_widget.setVisible(self._uses_filter() and not self._raster_output())
         # Threshold and min-area apply to everything that writes polygons.
         scd = self._raster_output()
         self.auto_threshold_check.setVisible(not scd)
@@ -434,9 +485,6 @@ class UChangeDialog(QDialog):
             if "out of memory" in str(e).lower():
                 tips = ["- Closing other programs that use the GPU",
                         "- Selecting CPU as the device"]
-                entry = self._model_registry.get(self.model_selector.currentText(), {})
-                if entry.get("type") == "ensemble":
-                    tips.insert(1, "- A DINOv2 model instead (Changen2 needs about 3.5 GB)")
                 if self.max_vram.value():
                     tips.insert(0, "- Raising the GPU memory limit (at least about 400 MB)")
                 QMessageBox.critical(
@@ -519,6 +567,12 @@ class UChangeDialog(QDialog):
             cmd.extend(["--preset", model_entry["preset"]])
             if self.fast_mode_check.isChecked():
                 cmd.append("--fast")
+            if self._uses_filter() and not self._raster_output():
+                if self.filter_check.isChecked():
+                    cmd.extend(["--filter-false-alarms",
+                                "--filter-min-score", f"{self.filter_score.value():.2f}"])
+                else:
+                    cmd.append("--no-filter-false-alarms")
 
         self._log("Starting inference subprocess...")
         proc = subprocess.Popen(
@@ -660,10 +714,22 @@ class UChangeDialog(QDialog):
             fill.setStrokeWidth(0.6)
             symbol.changeSymbolLayer(0, fill)
             categories.append(QgsRendererCategory(name, symbol, f"became {name}"))
-        layer.setRenderer(QgsCategorizedSymbolRenderer("to_class", categories))
+        # Same class on both dates: a detected change the land-cover classes can't
+        # name (e.g. a flat roof read as paving), not "became <class>".
+        symbol = QgsSymbol.defaultSymbol(layer.geometryType())
+        fill = QgsSimpleFillSymbolLayer()
+        fill.setColor(QColor(255, 255, 255, 60))
+        fill.setStrokeColor(QColor(255, 255, 255))
+        fill.setStrokeWidth(0.6)
+        fill.setStrokeStyle(Qt.DashLine)
+        symbol.changeSymbolLayer(0, fill)
+        categories.append(QgsRendererCategory(_UNCLEAR, symbol, "change, type unclear"))
+        layer.setRenderer(QgsCategorizedSymbolRenderer(
+            f"CASE WHEN \"from_class\" = \"to_class\" THEN '{_UNCLEAR}' ELSE \"to_class\" END",
+            categories))
         QgsProject.instance().addMapLayer(layer)
-        self._log("Layer 'Labelled change' added (colour = what it became; "
-                  "see the 'change' field for from -> to).")
+        self._log("Layer 'Labelled change' added (colour = what it became; dashed white = "
+                  "change whose type is unclear; see the 'change' field for from -> to).")
 
     def _handle_scd_result(self, result_info, output_dir):
         output_base = self.output_path.text()

@@ -1,5 +1,12 @@
 # Change Detection Experiments Summary
 
+Two parts: **Part 1** (Sep 2026) picks a backbone and decoder by training on LEVIR-CD+
+and testing on S2Looking. **[Part 2](#part-2-custom-dataset-oct-2026)**
+(Oct 2026) builds a custom hand-reviewed dataset from Google Earth Pro and uses
+it to choose a fine-tuning recipe.
+
+# Part 1: LEVIR-CD+ → S2Looking (Sep 2026)
+
 Training on LEVIR-CD+ (574 pairs, urban buildings, Google Earth, ~0.5m res).
 Testing on S2Looking (1000 pairs, also ~0.5m res) for cross-domain generalization.
 
@@ -74,3 +81,205 @@ Testing on S2Looking (1000 pairs, also ~0.5m res) for cross-domain generalizatio
 
 - Best ViT-B/14: `work_dirs/dinov2_vitb14_cd_v2/decoder_best.pth`
 - Best ViT-L/14: `work_dirs/dinov2_vitl14_cd_v2/decoder_best.pth`
+
+---
+
+# Part 2: Custom dataset (Oct 2026)
+
+Goal: try fine-tuning techniques on the custom imagery until one clearly wins, then test
+the winner on pairs from places it has never seen. Every number below is on squares
+held out from training.
+
+## Dataset
+
+13 squares of 1 km², each cut from a pair of Google Earth Pro captures (two dates, same
+untouched view, georeferenced by hand):
+
+| batch | squares | pixel size | real changes |
+|---|---|---|---|
+| first 7 (reviewed by 2026-10-13) | 7 squares in 5 places (two places have two squares each) | 0.38 m | 333 |
+| r01–r06 (2026-10-19) | 6 separate places, mostly hilly villages | 0.488 m | 342 |
+| **total** | 13 squares, 11 places | | **675** |
+
+Pipeline (all in `benchmarks/`):
+1. `prep_pairs.py`: captures + GCP points / world file → georeferenced scene pairs.
+2. `crop_pairs.py`: removes the few-metre shift between dates and cuts randomly placed
+   squares (random so the test isn't tilted toward easy places; same seed → same squares).
+3. `candidates.py`: union of blobs flagged by several detectors (shipped, ensemble,
+   fused / nudged; later the fine-tuned ones).
+4. `review_pack.py` + `review_style.py`: one `candidates.gpkg` per square, round 1 (usual
+   thresholds) and round 2 (sensitive thresholds), styled for QGIS.
+5. Review in QGIS: verdict real / false / unsure, plus polygons for missed areas
+   (`extra.gpkg` holds a second batch of candidates).
+6. `make_labels.py` → `train_label.tif`. Real outlines are tightened with SAM 2 (on the
+   after image, the before image for demolitions) when SAM agrees.
+
+| pixel | label | trained on? |
+|---|---|---|
+| no detector flagged it | 0 | yes |
+| candidate marked **false** | 0 | yes |
+| candidate **unsure** or unreviewed, tiny set-aside blobs, band around each change | 255 | no |
+| candidate marked **real**, or drawn as missed | 1 | yes |
+
+A "false" verdict sets the same label value as background. What it does is allow
+training on exactly the spots where models go wrong (seasonal fields, shadows, building
+lean, colour shifts); unreviewed candidates have to be ignored. Reviewing took about an
+hour per km², which is why each scene contributed only one square. The full scenes
+(~111 km² altogether) are mostly unlabelled.
+
+## Evaluation protocol
+
+- **Leave-one-city-out** (`loco_finetune.py`): fine-tune on the other cities, score the
+  held-out one. City = first 3 letters of the square name. Never hold out one square of a
+  city while its sibling stays in training.
+- **Threshold-free comparison** (`compare_loco.py`): pixel AP, best IoU, share of real
+  changes found at 20 false alarms/km², and false alarms/km² needed to find 85%.
+- **Run-to-run noise:** two identical runs of the plain fine-tune differ by about 0.02
+  pooled AP, 2 points of recall and 6–9 FA/km². Per place it is 0.005–0.007 AP for most,
+  but one place swings more (0.84 → 0.78 on one square). Anything smaller is
+  a tie.
+
+## Technique comparison (7 squares, 333 changes)
+
+All fine-tunes start from the shipped `dinov2_vitb14_c2s1_levir` decoder: 3000 steps,
+decoder only, crops half from our squares and half from LEVIR-CD (`finetune_dinov2.py`).
+"+ nudge" adds the label-free score with weight 1.0 (see below).
+
+| | pixel AP | best IoU | found at 20 FA/km² | FA/km² to find 85% |
+|---|---|---|---|---|
+| shipped | 0.599 | 0.452 | 45% | 116 |
+| shipped + nudge | 0.640 | 0.498 | 48% | 99 |
+| plain fine-tune, run 1 | 0.693 | 0.505 | 54% | 74 |
+| plain fine-tune, run 2 | 0.673 | 0.488 | 55% | 82 |
+| **plain fine-tune + nudge, run 1** | **0.727** | **0.555** | 62% | 63 |
+| plain fine-tune + nudge, run 2 | 0.712 | 0.537 | 61% | 69 |
+| plain + nudge weight 0.5 | 0.721 | 0.539 | 61% | 71 |
+| hard negatives | 0.666 | 0.481 | 59% | 92 |
+| hard negatives + nudge | 0.715 | 0.534 | 62% | 67 |
+| 25% LEVIR | 0.688 | 0.499 | 62% | 85 |
+| 25% LEVIR + nudge | 0.723 | 0.545 | 63% | 70 |
+| average of runs 1+2 | 0.687 | 0.501 | 53% | 76 |
+| average of runs 1+2 + nudge | 0.722 | 0.549 | 63% | 63 |
+| average of runs 1+2 + nudge weight 1.5 | 0.713 | 0.552 | 54% | 76 |
+| unfreeze last 2 backbone blocks | 0.653 | 0.483 | 55% | 81 |
+| unfreeze last 2 blocks + nudge | 0.692 | 0.525 | 62% | 62 |
+| 6000 steps | stopped after 2 held-out places: 0.757 → 0.698 and 0.433 → 0.382 AP | | | |
+
+Findings:
+1. **Fine-tuning on the training data is a clear gain:** AP 0.60 → 0.67–0.69, about 4× the
+   run-to-run noise.
+2. **The plain recipe is the pick.** Hard negatives, 25% LEVIR and averaging two runs all
+   land inside the two plain runs' range, so the simpler recipe wins.
+3. **Hard negatives** (30% of crops centred on "false" candidates, their pixels weighted
+   ×2) work at the strict end (59% vs 54% found at 20 FA/km²) but overcorrect: many
+   false alarms look like early-stage real change (disturbed ground, new paving,
+   half-built sites), so high-recall performance and AP drop. A gentler setting
+   (15% / ×1.5) is untested and unlikely to beat the noise.
+4. **Unfreezing is unstable** (AP on one held-out place fell to 0.45–0.57). **Longer training overfits**
+   the training cities and makes the model more cautious in new ones.
+5. Nudge weight 1.0 beats 0.5 and 1.5.
+
+## 13 squares (adding r01–r06)
+
+| | pixel AP | best IoU | found at 20 FA/km² | FA/km² to find 85% |
+|---|---|---|---|---|
+| shipped | 0.614 | 0.459 | 51% | 97 |
+| shipped + nudge | 0.655 | 0.496 | 55% | 73 |
+| fine-tune on 13 | 0.691 | 0.504 | 66% | 59 |
+| **fine-tune on 13 + nudge** | **0.709** | **0.526** | **68%** | **56** |
+
+- Per square (AP, shipped → fine-tune + nudge): big gains on four squares of the
+  training data (0.24 → 0.51, 0.51 → 0.66, 0.68 → 0.85, 0.26 → 0.38), smaller gains on
+  three (0.64 → 0.80, 0.74 → 0.85, 0.34 → 0.46), about level on the other six.
+- **Doubling the data gave no measurable gain on the first 7 squares** (AP 0.713 trained
+  on ~10 other places, vs 0.712–0.727 trained on 4). Likely reasons: the new places are
+  a different kind of terrain, their imagery is coarser (0.49 m vs 0.38 m), and the
+  labels themselves may now be the limit. More squares of the same kind are no longer a
+  cheap win; new kinds of place are.
+
+Thresholds for the fine-tune + nudge, pooled over the 13 held-out squares:
+
+| threshold | changes found | FA/km² | precision | F1 |
+|---|---|---|---|---|
+| 0.90 | 77% | 32 | 54% | 0.633 |
+| **0.94** (plugin default) | 72% | 22 | 61% | 0.661 |
+| 0.96 (best F1) | 66% | 17 | 67% | 0.665 |
+| 0.98 | 59% | 10 | 75% | 0.656 |
+
+Without the nudge, the balanced threshold is **0.85** (F1 0.649). For comparison, the
+shipped model at its balanced point finds 64% with 36 FA/km².
+
+On the public test sets, which label new buildings only, the fine-tuned model scores
+lower than the shipped one (AP: S2Looking 0.437 vs 0.501, LEVIR-CD 0.952 vs 0.960,
+EGY-BCD 0.689 vs 0.778), partly because it now also flags construction sites and
+cleared land.
+
+## The label-free nudge
+
+`uchange_qgis_plugin/labelfree.py`, `--label-free W`. No training. For each image pair:
+DINOv2 describes every 14×14 patch on both dates; each patch's change is measured
+against its 3×3 neighbours on the other date (tolerates misalignment and lean); patches
+are grouped into 16 surface types per date; each change is scored by how unusual it is
+for its own surface type in this pair (z ≈ 0 normal, > 0 unusual). W·z is added to the
+model's logit before thresholding. Seasonal, sensor-colour and haze changes affect a
+whole surface type at once, so they look normal. On its own it is a weak detector (it
+also flags newly ploughed fields or filled pools). Costs about 11 s per km² on the GPU.
+
+- **Public data (S2Looking):** weight chosen on validation, measured on test: about +6%
+  for both models. No label bias here.
+- **Our squares:** it raises AP for every model (table above), but polygon counts at the
+  recommended thresholds tell a weaker story:
+
+  | 13 held-out squares | polygons | real changes found | false alarms |
+  |---|---|---|---|
+  | nudge on (0.94) | 746 | 485 / 675 (72%) | 290 |
+  | nudge off (0.85) | 694 | 445 / 675 (66%) | 251 |
+  | difference | +52 | +40 | +39 |
+
+  Each extra find costs about one extra false polygon. At the same false-alarm rate
+  (~19/km²) the nudge finds only about 2% more (458 vs 445). It helps clearly on a few
+  squares of the training data and mostly adds noise on others.
+- **Label bias in its favour:** some candidates came from nudged detectors (`fused` in the
+  first 7 squares, `ftz` in r01–r06), so changes only the nudge found were labelled real.
+- **Conclusion (2026-10-20):** once the model is fine-tuned on our imagery, the nudge's real
+  benefit is probably close to zero. It mattered when the model hadn't seen this kind of
+  imagery. The suggestion is to make **nudge off at 0.85** the default and keep the
+  checkbox (not decided yet). On ground the model trained on, the nudge only adds noise
+  (78 vs 39 polygons on r05), so compare the two only on new places.
+
+## Caveats
+
+- **Ground truth comes from the union of the detectors' candidates**, plus what the
+  reviewer drew. Changes no detector flagged count against every model, so recall is
+  biased toward those detectors.
+- **r01–r06 candidates came from the 7-square fine-tune**, so the shipped model may be
+  scored a little harshly on those squares. The first 7 squares don't have this bias, and
+  the fine-tune still wins there.
+- **Roads:** only 4 labelled roads in the whole set; the model essentially can't detect
+  them.
+
+## Next steps
+
+1. **Test set:** 4–5 pairs from places the model has never seen, ideally in a couple of
+   countries, captured the same way (about 4 km view width, max resolution, view
+   untouched between dates). Candidates from both the shipped and the new model, so
+   neither gets an advantage. This answers: how good is the new model in new places,
+   does it beat the shipped one there despite slipping on public benchmarks, and does
+   the nudge help?
+2. Decide the nudge default (see above).
+3. If roads matter: draw the new roads in existing squares (r02 and r03 have many) and
+   retrain.
+4. If it misses a particular kind of place (dense old towns, desert, coastal villas),
+   capture a few squares of that kind.
+5. If the new model does worse than the shipped one in new places, keep the shipped model
+   as default and offer the fine-tune as an extra option.
+
+## Artifacts
+
+- The 13-square model (`weights/dinov2_vitb14_finetuned.decoder.pth`, the plugin's new
+  recommended model) and the `work_dirs/loco7`, `loco13` runs were lost on
+  2026-10-20 (see `work_dirs/RECOVERY_NOTES.md`). Retrain with `finetune_dinov2.py` on all
+  13 squares: 3000 steps, decoder only, `levir_batch 2`.
+- 11 leave-one-out fold models survived in `work_dirs/recovered_checkpoints`.
+- The Changen2 Hugging Face cache was deleted, so the ensemble detector is unavailable
+  offline.

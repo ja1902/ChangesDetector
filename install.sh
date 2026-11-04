@@ -196,11 +196,12 @@ elif [ "$status" -ne 0 ]; then
     echo "WARNING: weights/assemble.py failed (see above)."
 fi
 
-# The "Changen2 ViT-L + DINOv2" model needs torchange (about 1 GB of extra
-# packages plus ~1.2 GB of weights, CC BY-NC-SA 4.0). Installed by default;
-# skip it with: INSTALL_CHANGEN2=0 ./install.sh
+# The Changen2 ViT-L ensemble (research only, CLI --model-type ensemble; no
+# longer in the plugin) needs torchange (about 1 GB of extra packages plus
+# ~1.2 GB of weights, CC BY-NC-SA 4.0). Off by default; install it with:
+# INSTALL_CHANGEN2=1 ./install.sh
 echo ""
-if [[ ! "${INSTALL_CHANGEN2:-1}" =~ ^(0|[Nn]|no|false)$ ]]; then
+if [[ "${INSTALL_CHANGEN2:-0}" =~ ^(1|[Yy]|yes|true)$ ]]; then
     echo "Installing Changen2 model support (research use, ~2 GB)..."
     pip install --no-deps torchange ever-beta
     pip install einops timm albumentations tifffile tqdm wandb prettytable tensorboard matplotlib datasets huggingface_hub
@@ -215,14 +216,14 @@ if [[ ! "${INSTALL_CHANGEN2:-1}" =~ ^(0|[Nn]|no|false)$ ]]; then
             echo "Changen2 weights: OK"
         else
             echo "WARNING: Changen2 weights could not be downloaded (is huggingface.co reachable? a proxy or"
-            echo "         firewall may block it). Re-run the installer once it is, or the plugin will retry on first use."
+            echo "         firewall may block it). Re-run the installer once it is, or the CLI will retry on first use."
         fi
     else
         echo "WARNING: torchange does not import:"
         { python -c "$CHECK_CHANGEN2" 2>&1 || true; } | tail -1 | sed 's/^/         /'
     fi
 else
-    echo "Skipped Changen2 (INSTALL_CHANGEN2=0). The Changen2 model will show install instructions if selected."
+    echo "Skipped Changen2 (research only; INSTALL_CHANGEN2=1 ./install.sh to add it)."
 fi
 
 # -----------------------------------------------

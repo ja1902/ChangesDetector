@@ -2,6 +2,85 @@
 
 A research project exploring automated change detection between georeferenced satellite images, delivered as a QGIS plugin.
 
+## What changed (v0.9)
+
+### New default model: DINOv2 ViT-B finetuned
+
+**DINOv2 ViT-B finetuned** (`dinov2_vitb14_finetuned.pth`) is the recommended
+model's decoder
+
+What it brings:
+
+- **More kinds of change.** Besides new buildings it finds construction sites,
+  demolitions and cleared land.
+- **A false-alarm filter, on by default.** Most false alarms on high-resolution
+  imagery are tall buildings leaning differently between the two dates and shadows
+  that moved. The filter takes a second look at every detected change: a classifier
+  on the frozen DINO features of its before and after crops, trained on 1,711
+  hand-checked detections, judges whether it is a real change, and those judged false
+  are dropped. Kept changes are outlined at the model's usual threshold.
+  (`uchange_qgis_plugin/falsealarm_filter.py`, `weights/falsealarm_filter_finetuned.npz`.)
+
+Results, on 8 areas of the custom dataset, each scored by a model that was trained
+without that area (share of real changes found):
+
+| | at 10 false alarms / km2 | at 20 false alarms / km2 |
+|---|---|---|
+| synthetic data (previous default) | 47% | 58% |
+| finetuned | 60% | 71% |
+| **finetuned + false-alarm filter (default)** | **69%** | **76%** |
+
+On a new area that neither the model nor the filter had seen (23 changes), the
+plugin with its default settings finds 18 changes with 21 false alarms / km2;
+without the filter, 19 with 52. The filter removes about 60% of the false alarms
+and loses one real change.
+
+In the dialog, **"keep if real"** (default 0.46) sets how sure the filter must be:
+lower keeps more changes and more false alarms (0.30: 77% found with 22 false
+alarms / km2 on the 8 areas). Untick **"Filter false alarms"** to see everything the
+model finds at its threshold (0.85). From the command line: `--preset finetuned`,
+`--filter-min-score P`, `--no-filter-false-alarms`.
+
+On the public test sets, which label new buildings only, the finetuned model scores
+lower than the previous default, partly because it also flags construction sites
+and cleared land. If you only need new buildings, the previous default stays
+available as **DINOv2 ViT-B + synthetic data (general)**.
+
+### Labelled change uses the finetuned model and filter
+
+Labelled (from -> to) mode now finds its changes with the finetuned model and the
+false-alarm filter, so it gets the same gains as binary mode. The land-cover head
+reads only the frozen DINOv2 backbone, so the from/to classes are unchanged; it is the
+set of changes that improves. Its polygons are exactly the binary-mode polygons.
+
+Some changes have the same land cover on both dates, mostly construction sites (no
+class of their own) and some new flat roofs read as paving: about 1 in 8 of the real
+changes on the custom dataset. They are real detections whose type is unclear, so
+their `change` field reads e.g. "paved / road (class unchanged)" and QGIS draws them
+dashed white as "change, type unclear", not as "became paved / road". On the custom
+dataset, 77% of new buildings are named "... -> building".
+
+### A score on every polygon
+
+Every output polygon (binary and labelled) now carries:
+
+- `confidence`: the mean change probability inside it (0-1).
+- `filter_score`: with the false-alarm filter, its probability of being a real change
+  (kept if at least "keep if real", default 0.46). Sort by it to review the borderline
+  ones first. A detection redrawn as several polygons gives them all its score.
+- `area`, and `id` (labelled polygons: `id` replaces the old `blob` field).
+
+### Two binary models
+
+Binary mode now lists two models: **DINOv2 ViT-B finetuned** (recommended) and
+**DINOv2 ViT-B + synthetic data (general)**. The Changen2 ViT-L ensemble and the two
+v0.6 DINOv2 models are no longer in the plugin. The CLI still runs the Changen2
+ensemble (`--model-type ensemble --preset ensemble`) for research. The installer no
+longer sets up Changen2 by default (`INSTALL_CHANGEN2=1 ./install.sh` adds it) and no
+longer builds the v0.6 model files.
+
+
+
 ## What changed (v0.8)
 
 ### Less GPU memory and RAM, faster (v0.8.3)
@@ -238,10 +317,9 @@ A central finding is that most change detection models are **domain-locked** -- 
 
 | Model | Training Dataset | Architecture | Mode |
 |-------|-----------------|--------------|------|
-| **DINOv2 ViT-B + synthetic data (recommended)** | Changen2 synthetic + LEVIR-CD | Frozen ViT-B/14 + FPN decoder | Binary CD |
-| **DINOv2 ViT-B + land cover, from -> to (recommended)** | as above + OpenEarthMap + SECOND | Same backbone + land-cover head | Labelled CD |
-| DINOv2 ViT-B/14 (generalizable) | LEVIR-CD | Frozen ViT-B/14 + FPN decoder | Binary CD |
-| DINOv2 ViT-B/14 (fine-tuned) | LEVIR-CD + domain data | Frozen ViT-B/14 + FPN decoder | Binary CD |
+| **DINOv2 ViT-B finetuned (recommended)** | Changen2 synthetic + LEVIR-CD + custom dataset | Frozen ViT-B/14 + FPN decoder, false-alarm filter | Binary CD |
+| DINOv2 ViT-B + synthetic data (general) | Changen2 synthetic + LEVIR-CD | Frozen ViT-B/14 + FPN decoder | Binary CD |
+| **DINOv2 ViT-B + land cover, from -> to (recommended)** | finetuned model as above, land cover: OpenEarthMap + SECOND | Finetuned model + false-alarm filter + land-cover head | Labelled CD |
 
 ### Prerequisites
 
@@ -300,27 +378,26 @@ python weights/assemble.py . dinov2_vitb14_pretrain.pth
 
 This builds:
 
-- `dinov2_vitb14_c2s1_levir.pth` -- DINOv2 + synthetic data, the recommended binary model (also finds the changes in semantic mode)
+- `dinov2_vitb14_finetuned.pth` -- DINOv2 finetuned on a custom dataset, the recommended model (binary and labelled)
+- `dinov2_vitb14_c2s1_levir.pth` -- DINOv2 + synthetic data, the general binary model (also the starting point for `finetune_dinov2.py`)
 - `landcover_dinov2_vitb14_oem_second.pth` -- land-cover head for labelled (from -> to) change
-- `dinov2_vitb14_levir.pth` -- DINOv2 generalizable (v0.6)
-- `dinov2_vitb14_egybcd.pth` -- DINOv2 fine-tuned (v0.6)
 
 The backbone file can be deleted afterwards. The trained weights are for research / non-commercial use.
 
 ### Standalone CLI
 
 ```bash
-# Binary change detection: recommended DINOv2 model, tested settings, polygons
+# Binary change detection: the finetuned model with its false-alarm filter, tested settings, polygons
 python detect_changes.py --before before.tif --after after.tif --output-gpkg changes.gpkg
 
 # Labelled change: polygons with from_class / to_class / change / area
 python detect_changes.py --before before.tif --after after.tif --mode semantic     --output-gpkg labelled.gpkg --min-area 20
 
-# Another model, e.g. the v0.6 DINOv2 model with a per-scene threshold
-python detect_changes.py --before before.tif --after after.tif     --model-type dinov2 --weights dinov2_vitb14_levir.pth --threshold auto --output-gpkg changes.gpkg
+# The previous default (synthetic data, new buildings only), for comparison
+python detect_changes.py --before before.tif --after after.tif     --weights dinov2_vitb14_c2s1_levir.pth --preset synthetic --output-gpkg changes.gpkg
 ```
 
-Options: `--mode binary|semantic`, `--model-type dinov2|ensemble|dinov2_lc`, `--weights path/to/weights.pth`, `--preset synthetic|ensemble`, `--threshold auto|0.3`, `--target-gsd 0.5`, `--min-area 20`, `--histogram-match`, `--tile-size 252`, `--overlap 64`, `--no-coreg`, `--max-shift 50`, `--coreg-window 1024`, `--device auto|cpu|gpu`, `--max-vram 1024`, `--fast`, `--tta-gate 0.5`
+Options: `--mode binary|semantic`, `--model-type dinov2|ensemble|dinov2_lc`, `--weights path/to/weights.pth`, `--preset finetuned|synthetic|ensemble`, `--no-filter-false-alarms`, `--filter-min-score 0.46`, `--threshold auto|0.3`, `--target-gsd 0.5`, `--min-area 20`, `--histogram-match`, `--tile-size 252`, `--overlap 64`, `--no-coreg`, `--max-shift 50`, `--coreg-window 1024`, `--device auto|cpu|gpu`, `--max-vram 1024`, `--fast`, `--tta-gate 0.5`
 
 ### Training
 

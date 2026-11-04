@@ -29,13 +29,39 @@ def pixel_size_m(geo_info):
     px, py = abs(gt[1]), abs(gt[5])
     if srs.IsProjected():
         unit = srs.GetLinearUnits() or 1.0
-        return 0.5 * (px + py) * unit
+        size = 0.5 * (px + py) * unit
+        proj = (srs.GetAttrValue("PROJECTION") or "").lower()
+        if "mercator" in proj and "transverse" not in proj and "oblique" not in proj:
+            # Mercator (e.g. Web Mercator, EPSG:3857, as XYZ tiles come) stretches
+            # the map by 1/cos(latitude): at zoom 18 its 0.60 m "pixels" are
+            # ~0.49 m on the ground at 35° latitude.
+            lat = _centre_latitude(srs, gt, geo_info)
+            if lat is not None:
+                size *= math.cos(math.radians(lat))
+        return size
     if srs.IsGeographic():
         lat = gt[3] + gt[5] * geo_info.get("height", 0) / 2.0
         mx = px * 111320.0 * math.cos(math.radians(lat))
         my = py * 110540.0
         return 0.5 * (mx + my)
     return None
+
+
+def _centre_latitude(srs, gt, geo_info):
+    """Latitude (degrees) of the raster centre, or None."""
+    try:
+        from osgeo import osr
+        wgs = osr.SpatialReference()
+        wgs.ImportFromEPSG(4326)
+        if hasattr(osr, "OAMS_TRADITIONAL_GIS_ORDER"):
+            wgs.SetAxisMappingStrategy(osr.OAMS_TRADITIONAL_GIS_ORDER)
+            srs.SetAxisMappingStrategy(osr.OAMS_TRADITIONAL_GIS_ORDER)
+        cx = gt[0] + gt[1] * geo_info.get("width", 0) / 2.0 + gt[2] * geo_info.get("height", 0) / 2.0
+        cy = gt[3] + gt[4] * geo_info.get("width", 0) / 2.0 + gt[5] * geo_info.get("height", 0) / 2.0
+        _, lat, _ = osr.CoordinateTransformation(srs, wgs).TransformPoint(cx, cy)
+        return lat if -90.0 <= lat <= 90.0 else None
+    except Exception:
+        return None
 
 
 def working_factor(geo_info, target_gsd, scale=1.0, shape=None):

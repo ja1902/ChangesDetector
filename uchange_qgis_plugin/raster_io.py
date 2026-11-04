@@ -204,103 +204,66 @@ def _remove_small_holes(geom, min_area):
     return geom
 
 
-def polygonize_mask(binary_mask, geotransform, projection_wkt, output_path,
-                    min_area=0, style='exact'):
-    """Convert a binary mask to vector polygons and save as GeoPackage.
+def change_scores(ids, n, prob=None, filter_labels=None, filter_real=None):
+    """Per-change scores (index = change id, 0 unused) for the polygon attributes.
+
+    confidence    mean change probability inside the change (prob: (H, W) map)
+    filter_score  the false-alarm filter's probability that the change is real, from the
+                  filter blob it was drawn from (filter_labels: blob id per pixel,
+                  filter_real: probability per blob id); averaged over its pixels if
+                  smoothing joined two blobs
+    Missing inputs give None for that score.
+    """
+    m = ids > 0
+    k = ids[m]
+    cnt = np.bincount(k, minlength=n).astype(np.float64)
+    conf = real = None
+    if prob is not None:
+        conf = np.bincount(k, weights=prob[m], minlength=n) / np.maximum(cnt, 1)
+    if filter_labels is not None and filter_real is not None:
+        lab = filter_labels[m]
+        r = np.asarray(filter_real, np.float64)[lab]
+        ok = (lab > 0) & np.isfinite(r)
+        n_ok = np.bincount(k[ok], minlength=n)
+        real = np.bincount(k[ok], weights=r[ok], minlength=n) / np.maximum(n_ok, 1)
+        real[n_ok == 0] = np.nan
+    return conf, real
+
+
+def polygonize_changes(ids, geotransform, projection_wkt, output_path, fields=(),
+                       min_area=0, style='exact'):
+    """Change ids -> GeoPackage polygons, one per change (8-connected), with attributes.
 
     Args:
-        binary_mask: 2D uint8 numpy array (H, W), 1=change, 0=no-change
-        geotransform: GDAL geotransform from the input raster
-        projection_wkt: WKT projection string
-        output_path: path to output .gpkg file
+        ids: 2D int32 array of change ids (0 = no change)
+        fields: (name, kind, values) with kind "int", "real" or "str" and values indexed by
+            change id; NaN / None values are left empty
         min_area: minimum polygon area in map units; smaller polygons are removed
         style: 'exact', 'simplified', or 'convex hull'
+    Always writes "id" (the change id) and "area" (map units^2, after styling).
+    Returns (polygons created, polygons kept).
     """
-    binary_mask = _smooth_mask(binary_mask)
-
-    h, w = binary_mask.shape
-
-    mem_driver = gdal.GetDriverByName("MEM")
-    mem_ds = mem_driver.Create("", w, h, 1, gdal.GDT_Byte)
+    h, w = ids.shape
+    mem_ds = gdal.GetDriverByName("MEM").Create("", w, h, 1, gdal.GDT_Int32)
     mem_ds.SetGeoTransform(geotransform)
     mem_ds.SetProjection(projection_wkt)
     mem_band = mem_ds.GetRasterBand(1)
-    write_band(mem_band, binary_mask.astype(np.uint8))
+    write_band(mem_band, ids.astype(np.int32))
     mem_band.FlushCache()
 
     gpkg_driver = ogr.GetDriverByName("GPKG")
     if gpkg_driver is None:
         raise RuntimeError("GPKG OGR driver not available")
-
     out_ds = gpkg_driver.CreateDataSource(output_path)
     srs = None
     if projection_wkt:
         srs = osr.SpatialReference()
         srs.ImportFromWkt(projection_wkt)
-
     layer = out_ds.CreateLayer("changes", srs=srs, geom_type=ogr.wkbPolygon)
-    field_defn = ogr.FieldDefn("change", ogr.OFTInteger)
-    layer.CreateField(field_defn)
-
-    gdal.Polygonize(mem_band, mem_band, layer, 0, [], callback=None)
-
-    total_features = layer.GetFeatureCount()
-    pixel_w = abs(geotransform[1])
-
-    layer.ResetReading()
-    to_delete = []
-    for feat in layer:
-        geom = feat.GetGeometryRef()
-        if geom is None:
-            continue
-        if min_area > 0 and geom.GetArea() < min_area:
-            to_delete.append(feat.GetFID())
-            continue
-        geom = _remove_small_holes(geom, min_area)
-        styled = _apply_style(geom, style, pixel_w)
-        feat.SetGeometry(styled)
-        layer.SetFeature(feat)
-
-    for fid in to_delete:
-        layer.DeleteFeature(fid)
-
-    final_features = layer.GetFeatureCount()
-
-    out_ds.FlushCache()
-    out_ds = None
-    mem_ds = None
-
-    return total_features, final_features
-
-
-def polygonize_labelled_changes(blobs, from_cls, to_cls, class_names, geotransform,
-                                projection_wkt, output_path, min_area=0, style='exact'):
-    """Change blobs -> GeoPackage polygons carrying their before/after class.
-
-    Args:
-        blobs: 2D int32 array of blob ids (0 = no change)
-        from_cls, to_cls: per-blob class ids (index = blob id)
-        class_names: names for the class ids
-        min_area: minimum polygon area in map units
-    Fields: from_class, to_class, change ("farmland -> building"), area.
-    """
-    h, w = blobs.shape
-    mem_ds = gdal.GetDriverByName("MEM").Create("", w, h, 1, gdal.GDT_Int32)
-    mem_ds.SetGeoTransform(geotransform)
-    mem_ds.SetProjection(projection_wkt)
-    mem_band = mem_ds.GetRasterBand(1)
-    write_band(mem_band, blobs.astype(np.int32))
-    mem_band.FlushCache()
-
-    out_ds = ogr.GetDriverByName("GPKG").CreateDataSource(output_path)
-    srs = None
-    if projection_wkt:
-        srs = osr.SpatialReference()
-        srs.ImportFromWkt(projection_wkt)
-    layer = out_ds.CreateLayer("changes", srs=srs, geom_type=ogr.wkbPolygon)
-    layer.CreateField(ogr.FieldDefn("blob", ogr.OFTInteger))
-    for name in ("from_class", "to_class", "change"):
-        layer.CreateField(ogr.FieldDefn(name, ogr.OFTString))
+    layer.CreateField(ogr.FieldDefn("id", ogr.OFTInteger))
+    kinds = {"int": ogr.OFTInteger, "real": ogr.OFTReal, "str": ogr.OFTString}
+    for name, kind, _ in fields:
+        layer.CreateField(ogr.FieldDefn(name, kinds[kind]))
     layer.CreateField(ogr.FieldDefn("area", ogr.OFTReal))
 
     gdal.Polygonize(mem_band, mem_band, layer, 0, ["8CONNECTED=8"], callback=None)
@@ -316,13 +279,14 @@ def polygonize_labelled_changes(blobs, from_cls, to_cls, class_names, geotransfo
         if min_area > 0 and geom.GetArea() < min_area:
             to_delete.append(feat.GetFID())
             continue
-        k = feat.GetField("blob")
-        a, b = class_names[from_cls[k]], class_names[to_cls[k]]
+        k = feat.GetField("id")
         geom = _apply_style(_remove_small_holes(geom, min_area), style, pixel_w)
         feat.SetGeometry(geom)
-        feat.SetField("from_class", a)
-        feat.SetField("to_class", b)
-        feat.SetField("change", "%s -> %s" % (a, b))
+        for name, kind, values in fields:
+            v = values[k]
+            if v is None or (kind == "real" and not np.isfinite(v)):
+                continue
+            feat.SetField(name, int(v) if kind == "int" else float(v) if kind == "real" else str(v))
         feat.SetField("area", geom.GetArea())
         layer.SetFeature(feat)
     for fid in to_delete:
@@ -332,3 +296,69 @@ def polygonize_labelled_changes(blobs, from_cls, to_cls, class_names, geotransfo
     out_ds = None
     mem_ds = None
     return total, final
+
+
+def _score_fields(n, prob, filter_labels, filter_real, ids):
+    conf, real = change_scores(ids, n, prob, filter_labels, filter_real)
+    fields = []
+    if conf is not None:
+        fields.append(("confidence", "real", np.round(conf, 3)))
+    if real is not None:
+        fields.append(("filter_score", "real", np.round(real, 3)))
+    return fields
+
+
+def polygonize_mask(binary_mask, geotransform, projection_wkt, output_path,
+                    min_area=0, style='exact', prob=None, filter_labels=None, filter_real=None):
+    """Convert a binary mask to vector polygons and save as GeoPackage.
+
+    Args:
+        binary_mask: 2D uint8 numpy array (H, W), 1=change, 0=no-change
+        geotransform: GDAL geotransform from the input raster
+        projection_wkt: WKT projection string
+        output_path: path to output .gpkg file
+        min_area: minimum polygon area in map units; smaller polygons are removed
+        style: 'exact', 'simplified', or 'convex hull'
+        prob, filter_labels, filter_real: optional, for the "confidence" and
+            "filter_score" fields (see change_scores)
+    Fields: id, change (1), confidence, filter_score (with the filter), area.
+    """
+    import cv2
+    n, ids = cv2.connectedComponents(_smooth_mask(binary_mask.astype(np.uint8)), connectivity=8)
+    fields = [("change", "int", np.ones(n, np.int64))]
+    fields += _score_fields(n, prob, filter_labels, filter_real, ids)
+    return polygonize_changes(ids, geotransform, projection_wkt, output_path, fields,
+                              min_area=min_area, style=style)
+
+
+def change_name(from_name, to_name):
+    """The "change" field of a labelled polygon."""
+    if from_name == to_name:
+        return "%s (class unchanged)" % from_name
+    return "%s -> %s" % (from_name, to_name)
+
+
+def polygonize_labelled_changes(blobs, from_cls, to_cls, class_names, geotransform,
+                                projection_wkt, output_path, min_area=0, style='exact',
+                                prob=None, filter_labels=None, filter_real=None):
+    """Change blobs -> GeoPackage polygons carrying their before/after class.
+
+    Args:
+        blobs: 2D int32 array of change ids (0 = no change)
+        from_cls, to_cls: per-change class ids (index = change id)
+        class_names: names for the class ids
+        min_area: minimum polygon area in map units
+        prob, filter_labels, filter_real: optional, as in polygonize_mask
+    Fields: id, from_class, to_class, change ("farmland -> building", or "paved / road
+    (class unchanged)" when the land cover is the same on both dates: a detected change
+    the classes can't name, such as a flat roof read as paving), confidence,
+    filter_score (with the filter), area.
+    """
+    n = len(from_cls)
+    a = [class_names[c] for c in from_cls]
+    b = [class_names[c] for c in to_cls]
+    fields = [("from_class", "str", a), ("to_class", "str", b),
+              ("change", "str", [change_name(x, y) for x, y in zip(a, b)])]
+    fields += _score_fields(n, prob, filter_labels, filter_real, blobs)
+    return polygonize_changes(blobs, geotransform, projection_wkt, output_path, fields,
+                              min_area=min_area, style=style)

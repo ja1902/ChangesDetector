@@ -5,13 +5,15 @@ Usage:
     python detect_changes.py --before before.tif --after after.tif --output-gpkg changes.gpkg
     python detect_changes.py --before before.tif --after after.tif --mode semantic --output-gpkg labelled.gpkg
 
-Without --weights / --model-type this runs the recommended DINOv2 model with the
-pipeline it was evaluated with (--preset synthetic --threshold auto); semantic
-mode adds the land-cover head and writes from -> to polygons. Other models:
+Without --weights / --model-type this runs the finetuned DINOv2 model with the
+pipeline it was evaluated with, false-alarm filter included (--preset finetuned
+--threshold auto); semantic mode adds the land-cover head and writes from -> to
+polygons. Every polygon carries "confidence" (mean change probability inside it) and,
+with the filter, "filter_score" (its probability of being real). Other models:
     python detect_changes.py --before b.tif --after a.tif --model-type ensemble \
         --weights dinov2_vitb14_c2s1_levir.pth --preset ensemble --threshold auto
     python detect_changes.py --before b.tif --after a.tif --model-type dinov2 \
-        --weights dinov2_vitb14_levir.pth --threshold auto
+        --weights dinov2_vitb14_c2s1_levir.pth --preset synthetic --threshold auto
 With a preset, "--threshold auto" means the model's tested threshold.
 """
 
@@ -28,7 +30,7 @@ from PIL import Image
 
 import torch
 
-from uchange_qgis_plugin.model_registry import DEFAULT_WEIGHTS, PRESETS, preset_threshold
+from uchange_qgis_plugin.model_registry import DEFAULT_WEIGHTS, FINETUNED_WEIGHTS, PRESETS, preset_threshold
 
 
 _json_progress = False
@@ -155,7 +157,7 @@ def landcover_labels(model, head, device, binary_mask, before_img, after_img, lc
 
 
 def label_changes(args, model, head, device, binary_mask, before_img, after_img,
-                  geo_info, lc_factor):
+                  geo_info, lc_factor, scores=None):
     """Name every change blob: majority land cover before and after.
 
     Land cover runs at the pixel-size-corrected resolution (without the change
@@ -164,7 +166,7 @@ def label_changes(args, model, head, device, binary_mask, before_img, after_img,
     from collections import Counter
 
     from uchange_qgis_plugin.landcover import LANDCOVER_CLASSES, LANDCOVER_PALETTE
-    from uchange_qgis_plugin.raster_io import polygonize_labelled_changes, save_semantic_geotiff
+    from uchange_qgis_plugin.raster_io import change_name, polygonize_labelled_changes, save_semantic_geotiff
 
     blobs, from_cls, to_cls = landcover_labels(model, head, device, binary_mask,
                                                before_img, after_img, lc_factor)
@@ -179,7 +181,7 @@ def label_changes(args, model, head, device, binary_mask, before_img, after_img,
     areas = np.bincount(blobs.ravel(), minlength=len(from_cls)) * px_area
     kinds = Counter()
     for k in range(1, len(from_cls)):
-        kinds[f"{LANDCOVER_CLASSES[from_cls[k]]} -> {LANDCOVER_CLASSES[to_cls[k]]}"] += areas[k]
+        kinds[change_name(LANDCOVER_CLASSES[from_cls[k]], LANDCOVER_CLASSES[to_cls[k]])] += areas[k]
     for kind, area in kinds.most_common(6):
         _log(f"  {kind}: {area:,.0f} map units^2")
 
@@ -188,7 +190,7 @@ def label_changes(args, model, head, device, binary_mask, before_img, after_img,
         total, final = polygonize_labelled_changes(
             blobs, from_cls, to_cls, LANDCOVER_CLASSES, gt, proj, args.output_gpkg,
             min_area=args.min_area * px_area,
-            style="convex hull" if args.style == "convex" else args.style)
+            style="convex hull" if args.style == "convex" else args.style, **(scores or {}))
         _log(f"Polygons: {total} created, {final} after min-area filter")
         out.update(output_path=args.output_gpkg, total_polys=total, final_polys=final)
     return out
@@ -267,34 +269,69 @@ def build_parser():
                         help="Speckle removal: drop blobs whose confident core is thinner than this (m)")
     parser.add_argument("--no-cleanup", action="store_true",
                         help="Turn the preset's speckle removal off")
+    parser.add_argument("--label-free", type=float, default=None, metavar="W",
+                        help="Nudge the change probability by the label-free change score "
+                             "(uchange_qgis_plugin/labelfree.py) with weight W: "
+                             "sigmoid(logit(p) + W * z). Experimental, off by default; not "
+                             "used together with the false-alarm filter")
+    parser.add_argument("--no-label-free", action="store_true",
+                        help="Turn the label-free nudge off")
     parser.add_argument("--landcover-head", default="landcover_dinov2_vitb14_oem_second.pth",
                         help="Land-cover head for --model-type dinov2_lc (labelled change)")
+    parser.add_argument("--filter-false-alarms", action="store_true", default=None,
+                        help="Drop detected changes a classifier judges false (lean, shadows) and redraw the "
+                             "rest at the threshold (uchange_qgis_plugin/falsealarm_filter.py). Needs a "
+                             "preset with a false-alarm filter; on by default for those (finetuned)")
+    parser.add_argument("--no-filter-false-alarms", dest="filter_false_alarms",
+                        action="store_false", help="Turn the false-alarm filter off")
+    parser.add_argument("--filter-min-score", type=float, default=None, metavar="P",
+                        help="Keep detected changes the filter judges real with at least this probability "
+                             "(default: the preset's, 0.46). Lower keeps more")
     return parser
 
 
 def resolve_settings(args):
     """Fill model, weights, preset options and fast mode in place; returns the preset."""
 
-    # Defaults: the recommended DINOv2 model, run the way it was tested.
+    # Defaults: the recommended model, run the way it was tested: finetuned with its
+    # false-alarm filter (semantic mode adds the land-cover head).
     if args.weights is None and args.model_type is None and args.preset is None:
-        args.preset = "synthetic"
+        args.preset = "finetuned"
     if args.threshold is None:
         args.threshold = "auto" if args.preset else "0.5"
     if args.model_type is None:
         args.model_type = "dinov2_lc" if args.mode == "semantic" else "dinov2"
     if args.weights is None:
-        args.weights = DEFAULT_WEIGHTS
+        args.weights = FINETUNED_WEIGHTS if args.preset == "finetuned" else DEFAULT_WEIGHTS
 
     preset = PRESETS.get(args.preset, {}) if args.preset else {}
     for key, fallback in (("scale", 1.0), ("tta", False), ("logit_adjust", False),
                           ("target_gsd", 0.0), ("tile_size", 256), ("overlap", 0), ("tta_gate", 0.0),
-                          ("core_threshold", 0.0), ("min_blob_m2", 0.0), ("min_width_m", 0.0)):
+                          ("core_threshold", 0.0), ("min_blob_m2", 0.0), ("min_width_m", 0.0),
+                          ("label_free", 0.0)):
         if getattr(args, key) is None:
             setattr(args, key, preset.get(key, fallback))
     if args.fast:
         args.tta = False
     if args.no_cleanup:
         args.core_threshold = args.min_blob_m2 = args.min_width_m = 0.0
+    if args.no_label_free:
+        args.label_free = 0.0
+    bf = preset.get("false_alarm_filter")
+    # binary polygons, or labelled polygons (the filter runs on their change map)
+    polygon_run = ((args.mode == "binary" and args.model_type == "dinov2")
+                   or args.model_type == "dinov2_lc")
+    usable = (bf is not None and polygon_run
+              and os.path.isfile(os.path.join(os.path.dirname(os.path.abspath(__file__)), bf["file"])))
+    if args.filter_false_alarms is None:          # default: on wherever it can run
+        args.filter_false_alarms = usable
+        if bf is not None and not usable and polygon_run:
+            _log(f"False-alarm filter weights not found ({bf['file']}): filter off")
+    elif args.filter_false_alarms and not usable:
+        sys.exit("--filter-false-alarms needs a binary or labelled run with a preset that has a "
+                 "false-alarm filter (--preset finetuned) and its weights file")
+    if args.filter_false_alarms:
+        args.label_free = 0.0   # the filter was trained on maps without the nudge
 
     return preset
 
@@ -303,11 +340,11 @@ def resolve_threshold(args, preset):
     """Set args.threshold (float) and args.auto_threshold from --threshold."""
     if args.threshold == "auto" and "threshold" in preset:
         args.auto_threshold = False
-        args.threshold = preset_threshold(preset, args.tta)
+        args.threshold = preset_threshold(preset, args.tta, args.label_free)
         fast = ""
         if preset.get("tta") and not args.tta:
-            fast = (" (fast mode: no flip averaging)" if "fast_threshold" in preset else
-                    " (fast mode: no flip averaging; threshold tested with flip averaging)")
+            fast += (" (fast mode: no flip averaging)" if "fast_threshold" in preset else
+                     " (fast mode: no flip averaging; threshold tested with flip averaging)")
         _log(f"Recommended threshold for this model: {args.threshold:.2f}{fast}")
     elif args.threshold == "auto":
         args.auto_threshold = True
@@ -366,6 +403,7 @@ def main():
     if labelled:
         args.mode = "binary"
 
+    threshold_was_auto = args.threshold == "auto"
     resolve_threshold(args, preset)
 
     for path, label in [(args.before, "Before image"), (args.after, "After image")]:
@@ -529,6 +567,15 @@ def main():
             result = infer_probability(args, model, cs_model, before_img, after_img, factor,
                                        device, progress_fn)
             del cs_model
+            if args.label_free and model_type in ("dinov2", "ensemble", "dinov2_lc"):
+                from uchange_qgis_plugin.labelfree import label_free_z, nudge
+                t1 = time.time()
+                _log(f"Label-free change score (weight {args.label_free:g})...")
+                z = label_free_z(model, before_img, after_img, factor, device,
+                                 progress_fn=lambda i, n: _progress(80 + int(5 * i / n)))
+                nudge(result, z, args.label_free)
+                del z
+                _log(f"  {time.time() - t1:.1f}s")
     except RuntimeError as e:
         if "out of memory" in str(e).lower() and args.max_vram:
             _emit({"type": "error", "message": (
@@ -545,7 +592,7 @@ def main():
     elapsed = time.time() - t0
     _log(f"Inference: {elapsed:.1f}s")
 
-    if not labelled:
+    if not labelled and not args.filter_false_alarms:
         del model
         if device.type == "cuda":
             torch.cuda.empty_cache()
@@ -620,9 +667,35 @@ def main():
         from uchange_qgis_plugin.resolution import pixel_size_m
         area_px, width_px = to_pixels(gsd or pixel_size_m(before_geo or after_geo),
                                       args.min_blob_m2, args.min_width_m)
-        binary_mask = clean_mask(prob_map, args.threshold, args.core_threshold or None,
-                                 area_px, width_px)
-        if args.core_threshold or args.min_blob_m2 or args.min_width_m:
+        if args.filter_false_alarms:
+            from uchange_qgis_plugin.falsealarm_filter import filter_mask, load_filter
+            bf = preset["false_alarm_filter"]
+            flt = load_filter(os.path.join(project_root, bf["file"]))
+            # auto: the redraw threshold tested with the filter; a set threshold is used as is
+            redraw = bf["redraw"] if threshold_was_auto else args.threshold
+            low = min(bf["low"], redraw)
+            min_score = bf["min_score"] if args.filter_min_score is None else args.filter_min_score
+            t1 = time.time()
+            _log(f"False-alarm filter: changes at {low:.2f}, keep if judged real >= {min_score:.2f}, "
+                 f"outlines at {redraw:.2f}...")
+            binary_mask, fstats = filter_mask(
+                prob_map, before_img, after_img, model.backbone,
+                gsd or pixel_size_m(before_geo or after_geo) or 0.5, flt, device,
+                low=low, redraw=redraw, min_score=min_score,
+                progress_fn=lambda i, n: _progress(85 + int(10 * i / n)))
+            _log(f"  kept {fstats['kept']} of {fstats['blobs']} changes ({time.time() - t1:.1f}s)")
+            args.threshold = redraw
+            scores = {"prob": prob_map, "filter_labels": fstats["labels"],
+                      "filter_real": fstats["real_prob"]}
+            if not labelled:                    # land cover still needs the backbone
+                del model
+                if device.type == "cuda":
+                    torch.cuda.empty_cache()
+        else:
+            scores = {"prob": prob_map}
+            binary_mask = clean_mask(prob_map, args.threshold, args.core_threshold or None,
+                                     area_px, width_px)
+        if not args.filter_false_alarms and (args.core_threshold or args.min_blob_m2 or args.min_width_m):
             raw = int((prob_map > args.threshold).sum())
             _log(f"Speckle removal (core {args.core_threshold:.2f}, min {args.min_blob_m2:g} m2, "
                  f"min width {args.min_width_m:g} m): {raw - int(binary_mask.sum())} pixels removed")
@@ -640,7 +713,7 @@ def main():
         if labelled:
             result_info.update(label_changes(
                 args, model, lc_head, device, binary_mask, before_img, after_img,
-                geo_info, factor / args.scale))
+                geo_info, factor / args.scale, scores))
         elif args.output_gpkg and geo_info:
             _log(f"Polygonizing to {args.output_gpkg}...")
             from uchange_qgis_plugin.raster_io import polygonize_mask
@@ -652,7 +725,7 @@ def main():
             style = "convex hull" if args.style == "convex" else args.style
             total_polys, final_polys = polygonize_mask(
                 binary_mask, geo_info["geotransform"], geo_info["projection"],
-                args.output_gpkg, min_area=min_area_map, style=style,
+                args.output_gpkg, min_area=min_area_map, style=style, **scores,
             )
             _log(f"Polygons: {total_polys} created, {final_polys} after min-area filter")
             result_info["output_path"] = args.output_gpkg
