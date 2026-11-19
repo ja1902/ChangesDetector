@@ -247,6 +247,40 @@ also flags newly ploughed fields or filled pools). Costs about 11 s per km² on 
   checkbox (not decided yet). On ground the model trained on, the nudge only adds noise
   (78 vs 39 polygons on r05), so compare the two only on new places.
 
+## November 2026: what more can be found (v0.10)
+
+Eight ideas were tested against fixed bars, each on squares the model was not trained on
+(leave one city out). Score: "curve mean" = share of real changes found, averaged over
+5-28 false alarms per km2; a win needed +3 points with a bootstrap interval (over 200 m
+cells) clear of zero. Before that, the unjudged detections counted as false alarms were
+reviewed blind (about 400 panels): over half were real changes, so the baseline rose.
+
+| idea | result |
+|---|---|
+| wider tiles (364-742 px), and a wider view for the filter | level |
+| per-scale confidences in the filter | level |
+| teaching the filter a pair from its sibling square's verdicts | level |
+| height from a monocular depth model (Depth Anything V2 Small) | level |
+| instance-balanced loss (small changes weigh more in training) | level, inside run-to-run noise |
+| **weaker changes judged by the filter** (peaks >= 0.45 outside the detections) | **+3.8** [+2.5, +5.5] on 13 squares, 964 changes; found at 20 FA/km2 73% -> 80%, under 100 m2 191 -> 232 of 335 |
+| **S2Looking instead of LEVIR-CD as the training partner** | **+4.0** [+1.7, +6.4] with the filter (threshold only +6.3); by place of the training data, found at 10 FA/km2: 49% -> 72% and 64% -> 76% on two, 73% -> 55% on a third |
+| both together | +4.9 [+2.6, +7.8]; only +1.1 over the weaker changes alone: both win the same small changes |
+
+On pr1_c1 (unseen, strong building lean; 31 more blind panels) all four setups are level:
+at the default cut 8 (shipped) / 9 (S2Looking) changes with 1 false alarm per km2, at 20
+false alarms per km2 14 / 15 (with weaker changes) / 16. On pr2_c1 the weaker changes alter
+nothing at the default cut.
+
+Shipped in v0.10: the weaker changes in both finetuned presets (`orphan_peak` 0.45), and the
+S2Looking model as a second option (`--preset finetuned_s2l`), not the default because of
+that one loss. Its false-alarm filter keeps the shared first stage and refits the second
+on its own held-out maps. Retrain it with `finetune_dinov2.py --levir <S2Looking>
+--partner-dirs Image1,Image2 --partner-crop 370 --seed 1` on all 13 squares.
+
+Not tried yet: null pairs (SpaceNet-4 off-nadir views, zero change), a learned matcher's
+certainty as a filter input, relabelling the small set-aside candidates of the training
+squares.
+
 ## Caveats
 
 - **Ground truth comes from the union of the detectors' candidates**, plus what the

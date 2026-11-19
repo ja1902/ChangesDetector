@@ -86,6 +86,7 @@ def build_dinov2_model(checkpoint_path, device):
         patch_grid=cfg['patch_grid'],
         num_layers=cfg['num_decoder_layers'],
         diff=cfg.get('diff', 'abs'),
+        shift_r=cfg.get('shift_r', 1),
     )
     decoder.load_state_dict(ckpt['decoder'], strict=True)
 

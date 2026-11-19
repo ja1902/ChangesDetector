@@ -2,6 +2,29 @@
 
 A research project exploring automated change detection between georeferenced satellite images, delivered as a QGIS plugin.
 
+## What changed (v0.10)
+
+### The filter also judges weaker changes
+
+Small changes often never reach the model's 0.6 level, so the filter never saw them.
+It now also looks at the local peaks of the change map that reach 0.45 outside the
+detected changes, judges each the same way, and keeps the ones it trusts as much as
+the others. On the all areas of the custom dataset this raises the share found at 20 false alarms / km2 from 73% to
+80%, mostly changes under 100 m2; at the default "keep if real" it changes little,
+so lower that setting to see the gain. `--no-filter-orphans` turns it off.
+
+### An alternative model for oblique imagery
+
+**DINOv2 ViT-B finetuned, S2Looking (oblique imagery)** is the same model finetuned
+on the same custom dataset, but alongside S2Looking (off-angle satellite pairs)
+instead of LEVIR-CD, with its own false-alarm filter. It may suit oblique imagery
+and leaning buildings: on the 13 areas it finds more changes overall (70% against 66%
+with the filter, averaged over 5-28 false alarms / km2), with large gains in some areas
+and a clear loss in others, so it does not replace the recommended model. Binary mode
+now lists it between the two others. Try it if the recommended model misses changes.
+From the command line: `--preset finetuned_s2l`. The installer builds it like the other
+models (one more 35 MB decoder in `weights/`).
+
 ## What changed (v0.9)
 
 ### New default model: DINOv2 ViT-B finetuned
@@ -318,6 +341,7 @@ A central finding is that most change detection models are **domain-locked** -- 
 | Model | Training Dataset | Architecture | Mode |
 |-------|-----------------|--------------|------|
 | **DINOv2 ViT-B finetuned (recommended)** | Changen2 synthetic + LEVIR-CD + custom dataset | Frozen ViT-B/14 + FPN decoder, false-alarm filter | Binary CD |
+| DINOv2 ViT-B finetuned, S2Looking (oblique imagery) | Changen2 synthetic + LEVIR-CD + S2Looking + custom dataset | Frozen ViT-B/14 + FPN decoder, false-alarm filter | Binary CD |
 | DINOv2 ViT-B + synthetic data (general) | Changen2 synthetic + LEVIR-CD | Frozen ViT-B/14 + FPN decoder | Binary CD |
 | **DINOv2 ViT-B + land cover, from -> to (recommended)** | finetuned model as above, land cover: OpenEarthMap + SECOND | Finetuned model + false-alarm filter + land-cover head | Labelled CD |
 
@@ -379,6 +403,7 @@ python weights/assemble.py . dinov2_vitb14_pretrain.pth
 This builds:
 
 - `dinov2_vitb14_finetuned.pth` -- DINOv2 finetuned on a custom dataset, the recommended model (binary and labelled)
+- `dinov2_vitb14_finetuned_s2l.pth` -- the same, finetuned alongside S2Looking, for oblique imagery (binary)
 - `dinov2_vitb14_c2s1_levir.pth` -- DINOv2 + synthetic data, the general binary model (also the starting point for `finetune_dinov2.py`)
 - `landcover_dinov2_vitb14_oem_second.pth` -- land-cover head for labelled (from -> to) change
 
@@ -393,11 +418,14 @@ python detect_changes.py --before before.tif --after after.tif --output-gpkg cha
 # Labelled change: polygons with from_class / to_class / change / area
 python detect_changes.py --before before.tif --after after.tif --mode semantic     --output-gpkg labelled.gpkg --min-area 20
 
+# The alternative for oblique imagery (S2Looking variant, its own filter)
+python detect_changes.py --before before.tif --after after.tif --preset finetuned_s2l --output-gpkg changes.gpkg
+
 # The previous default (synthetic data, new buildings only), for comparison
 python detect_changes.py --before before.tif --after after.tif     --weights dinov2_vitb14_c2s1_levir.pth --preset synthetic --output-gpkg changes.gpkg
 ```
 
-Options: `--mode binary|semantic`, `--model-type dinov2|ensemble|dinov2_lc`, `--weights path/to/weights.pth`, `--preset finetuned|synthetic|ensemble`, `--no-filter-false-alarms`, `--filter-min-score 0.46`, `--threshold auto|0.3`, `--target-gsd 0.5`, `--min-area 20`, `--histogram-match`, `--tile-size 252`, `--overlap 64`, `--no-coreg`, `--max-shift 50`, `--coreg-window 1024`, `--device auto|cpu|gpu`, `--max-vram 1024`, `--fast`, `--tta-gate 0.5`
+Options: `--mode binary|semantic`, `--model-type dinov2|ensemble|dinov2_lc`, `--weights path/to/weights.pth`, `--preset finetuned|finetuned_s2l|synthetic|ensemble`, `--no-filter-false-alarms`, `--filter-min-score 0.46`, `--no-filter-orphans`, `--threshold auto|0.3`, `--target-gsd 0.5`, `--min-area 20`, `--histogram-match`, `--tile-size 252`, `--overlap 64`, `--no-coreg`, `--max-shift 50`, `--coreg-window 1024`, `--device auto|cpu|gpu`, `--max-vram 1024`, `--fast`, `--tta-gate 0.5`
 
 ### Training
 

@@ -45,8 +45,26 @@ PRESETS = {
         "logit_adjust": True, "target_gsd": 0.5, "threshold": 0.85,
         "core_threshold": 0.0, "min_blob_m2": 0.0, "min_width_m": 0.0,
         "fast_mode": True, "tta_gate": 0.5,
+        # orphan_peak: also judge weaker changes peaking at 0.45 outside the blobs
+        # (falsealarm_filter.orphans): on the 13 squares 4 more changes found in 100 at
+        # the same false-alarm rate, mostly small ones; on pr1_c1 / pr2_c1 no change at 0.46.
         "false_alarm_filter": {"file": "weights/falsealarm_filter_finetuned.npz",
-                               "low": 0.6, "redraw": 0.83, "min_score": 0.46},
+                               "low": 0.6, "redraw": 0.83, "min_score": 0.46, "orphan_peak": 0.45},
+    },
+    # The same pipeline with the model finetuned alongside S2Looking (off-angle satellite
+    # pairs) instead of LEVIR-CD, and its own false-alarm filter (stage 2 refit on that
+    # model's maps, work_dirs/exp_s2l/export_filter_s2l.py). Same 8 + 5 squares, each
+    # scored by a model trained without its city: 70.5% curve mean against 66.5% for
+    # "finetuned" (with orphans 71.4% against 70.3%); much better on two places of the
+    # training data, worse on a third; pr1_c1 (unseen, strong building lean) 9 found against 8
+    # at the default cut, 16 against 15 at 20 false alarms per km2.
+    "finetuned_s2l": {
+        "tile_size": 252, "overlap": 64, "scale": 1.4, "tta": True,
+        "logit_adjust": True, "target_gsd": 0.5, "threshold": 0.85,
+        "core_threshold": 0.0, "min_blob_m2": 0.0, "min_width_m": 0.0,
+        "fast_mode": True, "tta_gate": 0.5,
+        "false_alarm_filter": {"file": "weights/falsealarm_filter_finetuned_s2l.npz",
+                               "low": 0.6, "redraw": 0.83, "min_score": 0.46, "orphan_peak": 0.45},
     },
     "ensemble": {
         "tile_size": 252, "overlap": 64, "scale": 1.4, "tta": True,
@@ -68,6 +86,11 @@ MODEL_REGISTRY = {
     "DINOv2 ViT-B finetuned (recommended)": {
         "file": "dinov2_vitb14_finetuned.pth", "type": "dinov2", "preset": "finetuned",
         "tile_size": 252, "overlap": 64},
+    # Alternative: finetuned alongside off-angle satellite pairs (S2Looking); may suit
+    # oblique imagery and leaning buildings. Try it if the recommended model misses changes.
+    "DINOv2 ViT-B finetuned, S2Looking (oblique imagery)": {
+        "file": "dinov2_vitb14_finetuned_s2l.pth", "type": "dinov2", "preset": "finetuned_s2l",
+        "tile_size": 252, "overlap": 64},
     "DINOv2 ViT-B + synthetic data (general)": {
         "file": "dinov2_vitb14_c2s1_levir.pth", "type": "dinov2", "preset": "synthetic",
         "tile_size": 252, "overlap": 64},
@@ -78,6 +101,8 @@ MODEL_REGISTRY = {
 # synthetic model, used when a preset other than "finetuned" is given without weights.
 DEFAULT_WEIGHTS = "dinov2_vitb14_c2s1_levir.pth"
 FINETUNED_WEIGHTS = "dinov2_vitb14_finetuned.pth"
+# model file a preset runs when no --weights is given (others: DEFAULT_WEIGHTS)
+PRESET_WEIGHTS = {"finetuned": FINETUNED_WEIGHTS, "finetuned_s2l": "dinov2_vitb14_finetuned_s2l.pth"}
 
 SECOND_SEMANTIC_CLASSES = (
     'unchanged', 'water', 'ground',

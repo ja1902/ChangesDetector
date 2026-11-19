@@ -159,12 +159,13 @@ def shift_tolerant_diff(fa, fb, r=1):
 
 class MultiLayerChangeDecoder(nn.Module):
     def __init__(self, in_dim=768, hidden_dim=256, out_size=518,
-                 patch_grid=37, num_layers=4, diff="abs"):
+                 patch_grid=37, num_layers=4, diff="abs", shift_r=1):
         super().__init__()
         self.patch_grid = patch_grid
         self.out_size = out_size
         self.num_layers = num_layers
         self.diff = diff
+        self.shift_r = shift_r      # search radius in patches for diff="shift"
 
         self.layer_norms = nn.ModuleList([nn.LayerNorm(in_dim) for _ in range(num_layers)])
         self.layer_projs = nn.ModuleList([
@@ -201,7 +202,7 @@ class MultiLayerChangeDecoder(nn.Module):
             fb_normed = self.layer_norms[i](feats_b[i])
             fa = fa_normed.permute(0, 2, 1).reshape(B, -1, H, W)
             fb = fb_normed.permute(0, 2, 1).reshape(B, -1, H, W)
-            diff = shift_tolerant_diff(fa, fb) if self.diff == "shift" else torch.abs(fa - fb)
+            diff = shift_tolerant_diff(fa, fb, self.shift_r) if self.diff == "shift" else torch.abs(fa - fb)
             x = torch.cat([fa, fb, diff], dim=1)
             projected.append(self.layer_projs[i](x))
 

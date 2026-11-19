@@ -30,7 +30,7 @@ from PIL import Image
 
 import torch
 
-from uchange_qgis_plugin.model_registry import DEFAULT_WEIGHTS, FINETUNED_WEIGHTS, PRESETS, preset_threshold
+from uchange_qgis_plugin.model_registry import DEFAULT_WEIGHTS, PRESET_WEIGHTS, PRESETS, preset_threshold
 
 
 _json_progress = False
@@ -287,6 +287,9 @@ def build_parser():
     parser.add_argument("--filter-min-score", type=float, default=None, metavar="P",
                         help="Keep detected changes the filter judges real with at least this probability "
                              "(default: the preset's, 0.46). Lower keeps more")
+    parser.add_argument("--no-filter-orphans", action="store_true",
+                        help="With the false-alarm filter: do not look for weaker changes (local peaks "
+                             "at 0.45 outside the detected ones) for the filter to judge")
     return parser
 
 
@@ -302,7 +305,7 @@ def resolve_settings(args):
     if args.model_type is None:
         args.model_type = "dinov2_lc" if args.mode == "semantic" else "dinov2"
     if args.weights is None:
-        args.weights = FINETUNED_WEIGHTS if args.preset == "finetuned" else DEFAULT_WEIGHTS
+        args.weights = PRESET_WEIGHTS.get(args.preset, DEFAULT_WEIGHTS)
 
     preset = PRESETS.get(args.preset, {}) if args.preset else {}
     for key, fallback in (("scale", 1.0), ("tta", False), ("logit_adjust", False),
@@ -329,7 +332,7 @@ def resolve_settings(args):
             _log(f"False-alarm filter weights not found ({bf['file']}): filter off")
     elif args.filter_false_alarms and not usable:
         sys.exit("--filter-false-alarms needs a binary or labelled run with a preset that has a "
-                 "false-alarm filter (--preset finetuned) and its weights file")
+                 "false-alarm filter (--preset finetuned or finetuned_s2l) and its weights file")
     if args.filter_false_alarms:
         args.label_free = 0.0   # the filter was trained on maps without the nudge
 
@@ -675,15 +678,18 @@ def main():
             redraw = bf["redraw"] if threshold_was_auto else args.threshold
             low = min(bf["low"], redraw)
             min_score = bf["min_score"] if args.filter_min_score is None else args.filter_min_score
+            orphan_peak = None if args.no_filter_orphans else bf.get("orphan_peak")
             t1 = time.time()
             _log(f"False-alarm filter: changes at {low:.2f}, keep if judged real >= {min_score:.2f}, "
                  f"outlines at {redraw:.2f}...")
             binary_mask, fstats = filter_mask(
                 prob_map, before_img, after_img, model.backbone,
                 gsd or pixel_size_m(before_geo or after_geo) or 0.5, flt, device,
-                low=low, redraw=redraw, min_score=min_score,
+                low=low, redraw=redraw, min_score=min_score, orphan_peak=orphan_peak,
                 progress_fn=lambda i, n: _progress(85 + int(10 * i / n)))
-            _log(f"  kept {fstats['kept']} of {fstats['blobs']} changes ({time.time() - t1:.1f}s)")
+            weak = (f", and {fstats['orphans_kept']} of {fstats['orphans']} weaker ones"
+                    if orphan_peak else "")
+            _log(f"  kept {fstats['kept']} of {fstats['blobs']} changes{weak} ({time.time() - t1:.1f}s)")
             args.threshold = redraw
             scores = {"prob": prob_map, "filter_labels": fstats["labels"],
                       "filter_real": fstats["real_prob"]}

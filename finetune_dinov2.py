@@ -17,6 +17,17 @@ with flips, 90-degree turns, a separate colour jitter per date and random date o
                      # "false", and their pixels count twice in the loss
     python finetune_dinov2.py ... --unfreeze 2       # also train DINOv2's last 2 blocks (lr x0.1)
     python finetune_dinov2.py ... --batch 3 --levir-batch 1   # 25% LEVIR instead of 50%
+    python finetune_dinov2.py ... --inst-ref-m2 400
+                     # instance-balanced loss: every change pixel is weighted by
+                     # sqrt(400 m2 / area of its change), between --inst-floor and --inst-cap,
+                     # so a 60 m2 change counts about as much as a 2,000 m2 site
+    python finetune_dinov2.py ... --seed 1 --avg-last 0.33
+                     # fixed seed; save the average of the weights over the last third of training
+
+Every run is seeded (torch, numpy, random, the DataLoader workers and the LEVIR shuffle).
+Without --seed a random one is drawn; it is printed and stored in the checkpoint's config.
+Runs with the same seed draw the same crops in the same order, but are not bit-identical:
+some CUDA kernels (e.g. the upsampling backward) add in a nondeterministic order.
 
 Writes <out>/dinov2_finetuned.pth in the plugin's format (backbone + decoder + config):
 load it in QGIS or pass it to detect_changes.py / benchmarks/bench.py with --weights.
@@ -121,7 +132,7 @@ class Squares(torch.utils.data.Dataset):
     """Random crops of the labelled squares, at the plugin's working scale."""
 
     def __init__(self, folders, crop=518, scale=1.4, target_gsd=0.5, length=100000, hard_frac=0.0,
-                 misalign_m=0.0, shadow_p=0.0):
+                 misalign_m=0.0, shadow_p=0.0, inst_ref_m2=0.0, inst_cap=4.0, inst_floor=0.25):
         self.crop, self.length, self.hard_frac = crop, length, hard_frac
         self.misalign_m, self.shadow_p = misalign_m, shadow_p
         self.items = []
@@ -141,14 +152,22 @@ class Squares(torch.utils.data.Dataset):
             if hard_frac > 0:
                 hard = np.array(Image.fromarray(false_mask(f).astype(np.uint8)).resize(size, Image.NEAREST)) > 0
                 hard &= lab == 0                     # a drawing or an outline band wins
-            self.items.append((f.name, a, b, lab, ys, xs, hard, *np.nonzero(hard), gsd / factor))
+            wmap = np.ones(lab.shape, np.float32)       # loss weight per pixel (instance-balanced loss)
+            if inst_ref_m2 > 0:
+                import cv2
+                n, comp, st, _ = cv2.connectedComponentsWithStats((lab == 1).astype(np.uint8), connectivity=8)
+                area = st[:, cv2.CC_STAT_AREA] * (gsd / factor) ** 2
+                w = np.clip(np.sqrt(inst_ref_m2 / np.maximum(area, 1e-6)), inst_floor, inst_cap).astype(np.float32)
+                w[0] = 1.0
+                wmap = w[comp]
+            self.items.append((f.name, a, b, lab, ys, xs, hard, *np.nonzero(hard), gsd / factor, wmap))
 
     def __len__(self):
         return self.length
 
     def __getitem__(self, _):
         rng = np.random.default_rng(int(torch.randint(1 << 62, (1,))))   # differs per worker and call
-        _, a, b, lab, ys, xs, hard, hy, hx, px_m = self.items[rng.integers(len(self.items))]
+        _, a, b, lab, ys, xs, hard, hy, hx, px_m, wmap = self.items[rng.integers(len(self.items))]
         h, w = lab.shape
         c = self.crop
         u = rng.random()
@@ -164,6 +183,7 @@ class Squares(torch.utils.data.Dataset):
             y, x = int(rng.integers(h - c + 1)), int(rng.integers(w - c + 1))
         ca, cb, cl = a[y:y + c, x:x + c], b[y:y + c, x:x + c], lab[y:y + c, x:x + c]
         ch = hard[y:y + c, x:x + c]
+        cw = wmap[y:y + c, x:x + c]
         if self.misalign_m > 0:                      # labels stay in the before image's frame
             cb = misalign_crop(b, y, x, c, rng.uniform(0, 1) * self.misalign_m / px_m, rng)
         if self.shadow_p > 0:
@@ -172,14 +192,35 @@ class Squares(torch.utils.data.Dataset):
             if rng.random() < self.shadow_p / 2:
                 ca = shadow_jitter(ca, rng, px_m)
         k = int(rng.integers(4))
-        ca, cb, cl, ch = np.rot90(ca, k), np.rot90(cb, k), np.rot90(cl, k), np.rot90(ch, k)
+        ca, cb, cl, ch, cw = np.rot90(ca, k), np.rot90(cb, k), np.rot90(cl, k), np.rot90(ch, k), np.rot90(cw, k)
         if rng.random() < 0.5:
-            ca, cb, cl, ch = ca[:, ::-1], cb[:, ::-1], cl[:, ::-1], ch[:, ::-1]
+            ca, cb, cl, ch, cw = ca[:, ::-1], cb[:, ::-1], cl[:, ::-1], ch[:, ::-1], cw[:, ::-1]
         ca, cb = jitter(ca, rng), jitter(cb, rng)
         if rng.random() < 0.5:                       # change is symmetric in time
             ca, cb = cb, ca
         return (norm(ca), norm(cb), torch.from_numpy(cl.astype(np.int64).copy()),
-                torch.from_numpy(ch.copy()))
+                torch.from_numpy(ch.copy()), torch.from_numpy(cw.copy()))
+
+
+class Partner(CDDataset):
+    """The public partner dataset of each batch (LEVIR-CD by default).
+
+    src_crop > 0: a random src_crop px window is cut first and then resized to 518 px, e.g.
+    370 for S2Looking (1024 px tiles at 0.5-0.8 m), which puts it near the x1.4 view of your
+    squares. With the defaults this is exactly CDDataset(root, "train", 518, augment=True).
+    """
+
+    def __init__(self, root, dirs=("A", "B"), src_crop=0):
+        super().__init__(root, "train", 518, augment=True, dir_a=dirs[0], dir_b=dirs[1])
+        self.src_crop = src_crop
+
+    def _augment(self, a, b, label):
+        c = self.src_crop
+        if c and a.shape[0] > c and a.shape[1] > c:
+            top = np.random.randint(0, a.shape[0] - c + 1)
+            left = np.random.randint(0, a.shape[1] - c + 1)
+            a, b, label = (x[top:top + c, left:left + c] for x in (a, b, label))
+        return super()._augment(a, b, label)
 
 
 def forward_partial(model, a, b, n_free):
@@ -215,6 +256,10 @@ def main():
     ap.add_argument("--squares", required=True, help="folder of labelled squares (train_label.tif in each)")
     ap.add_argument("--only", default=None, help="comma list of squares to train on (default: all)")
     ap.add_argument("--levir", default="../cd-changer/open-cd-main/data/LEVIR-CD")
+    ap.add_argument("--partner-dirs", default="A,B",
+                    help="before,after folder names inside <--levir>/train (S2Looking: Image1,Image2)")
+    ap.add_argument("--partner-crop", type=int, default=0,
+                    help="cut this many px from each partner tile before resizing to 518 (0 = as LEVIR: off)")
     ap.add_argument("--weights", default="dinov2_vitb14_c2s1_levir.pth")
     ap.add_argument("--out", default="work_dirs/finetune_gee")
     ap.add_argument("--steps", type=int, default=3000)
@@ -232,12 +277,36 @@ def main():
                     help="warp the after crop by a random smooth shift of up to this many metres (0 = off)")
     ap.add_argument("--shadow-p", type=float, default=0.0,
                     help="chance of a shadow change on the after crop (half that on the before crop; 0 = off)")
+    ap.add_argument("--diff", choices=["abs", "shift"], default=None,
+                    help="how the decoder compares dates: abs = same patch, shift = best-matching patch "
+                         "within --shift-r patches (tolerates lean); default: as in --weights")
+    ap.add_argument("--shift-r", type=int, default=1, help="search radius in patches for --diff shift")
+    ap.add_argument("--inst-ref-m2", type=float, default=0.0,
+                    help="instance-balanced loss: weight each change pixel by sqrt(this / area of its change in m2) "
+                         "(0 = off: every pixel counts the same)")
+    ap.add_argument("--inst-cap", type=float, default=4.0, help="largest instance weight (small changes)")
+    ap.add_argument("--inst-floor", type=float, default=0.25, help="smallest instance weight (large sites)")
+    ap.add_argument("--seed", type=int, default=None, help="random seed (default: a random one, printed and saved)")
+    ap.add_argument("--avg-last", type=float, default=0.0,
+                    help="save the average of the trained weights over this last share of the steps "
+                         "(e.g. 0.33; BatchNorm statistics averaged too). The last-step decoder goes to "
+                         "decoder_last.pth. 0 = off: save the last-step weights")
     args = ap.parse_args()
+    seed = args.seed if args.seed is not None else random.SystemRandom().randrange(1 << 31)
+    print(f"seed {seed}")
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)                         # also seeds the DataLoader workers (base seed)
+    torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.benchmark = False
 
     from uchange_qgis_plugin.models import build_dinov2_model
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     ck = torch.load(ROOT / args.weights, map_location="cpu", weights_only=False)
     model, _ = build_dinov2_model(str(ROOT / args.weights), device)
+    if args.diff:                                   # same weights, different comparison: the decoder adapts
+        model.decoder.diff, model.decoder.shift_r = args.diff, args.shift_r
+        ck["config"] = dict(ck["config"], diff=args.diff, shift_r=args.shift_r)
     model.float()                                   # decoder trains in float32 (autocast below)
     model.backbone.half()
     free = list(model.backbone.blocks[len(model.backbone.blocks) - args.unfreeze:]) if args.unfreeze else []
@@ -257,11 +326,13 @@ def main():
         sys.exit("no labelled squares (run benchmarks/make_labels.py first)")
     print("your squares:", ", ".join(p.name for p in folders))
     own = torch.utils.data.DataLoader(Squares(folders, hard_frac=args.hard_frac, misalign_m=args.misalign_m,
-                                              shadow_p=args.shadow_p), batch_size=args.batch,
-                                      num_workers=args.workers)
-    lev = torch.utils.data.DataLoader(CDDataset(args.levir, "train", 518, augment=True),
+                                              shadow_p=args.shadow_p, inst_ref_m2=args.inst_ref_m2,
+                                              inst_cap=args.inst_cap, inst_floor=args.inst_floor),
+                                      batch_size=args.batch,
+                                      num_workers=args.workers, generator=torch.Generator().manual_seed(seed))
+    lev = torch.utils.data.DataLoader(Partner(args.levir, args.partner_dirs.split(","), args.partner_crop),
                                       batch_size=n_lev, shuffle=True, num_workers=args.workers,
-                                      drop_last=True)
+                                      drop_last=True, generator=torch.Generator().manual_seed(seed + 1))
     own_it, lev_it = endless(own), endless(lev)
 
     groups = [{"params": list(model.decoder.parameters()), "lr": args.lr}]
@@ -272,10 +343,15 @@ def main():
     sched = torch.optim.lr_scheduler.OneCycleLR(opt, max_lr=[g["lr"] for g in groups], total_steps=args.steps,
                                                 pct_start=0.05)
     scaler = torch.amp.GradScaler("cuda", enabled=device.type == "cuda")
+    # weight averaging: running mean of every float tensor of the trained modules
+    trained = {"decoder": model.decoder, **{f"blocks.{len(model.backbone.blocks) - args.unfreeze + j}": blk
+                                            for j, blk in enumerate(free)}}
+    avg_from = args.steps - int(round(args.avg_last * args.steps)) + 1 if args.avg_last > 0 else None
+    avg, n_avg = None, 0
     model.train()
     t0, run = time.time(), {"own": 0.0, "levir": 0.0}
     for step in range(1, args.steps + 1):
-        oa, ob, ol, oh = next(own_it)
+        oa, ob, ol, oh, ow = next(own_it)
         la, lb, ll = next(lev_it)
         a = torch.cat([oa, la]).to(device).half()
         b = torch.cat([ob, lb]).to(device).half()
@@ -284,9 +360,9 @@ def main():
             logits = forward_partial(model, a, b, args.unfreeze) if free else model(a, b)
         logits = logits.float()
         n = len(oa)
-        if args.hard_weight != 1.0:
+        if args.hard_weight != 1.0 or args.inst_ref_m2 > 0:
             ce = F.cross_entropy(logits[:n], lab[:n], ignore_index=IGNORE, reduction="none")
-            wt = (1 + (args.hard_weight - 1) * oh.to(device).float()) * (lab[:n] != IGNORE)
+            wt = (1 + (args.hard_weight - 1) * oh.to(device).float()) * ow.to(device) * (lab[:n] != IGNORE)
             l_own = (ce * wt).sum() / wt.sum().clamp(min=1)
         else:
             l_own = F.cross_entropy(logits[:n], lab[:n], ignore_index=IGNORE)
@@ -297,6 +373,15 @@ def main():
         scaler.step(opt)
         scaler.update()
         sched.step()
+        if avg_from is not None and step >= avg_from:
+            n_avg += 1
+            cur = {f"{m}.{k}": v.detach().float() for m, mod in trained.items() for k, v in mod.state_dict().items()
+                   if v.is_floating_point()}
+            if avg is None:
+                avg = {k: v.clone() for k, v in cur.items()}
+            else:
+                for k, v in cur.items():
+                    avg[k] += (v - avg[k]) / n_avg
         run["own"] += l_own.item()
         run["levir"] += l_lev.item()
         if step % 50 == 0 or step == args.steps:
@@ -307,8 +392,19 @@ def main():
     cfg = dict(ck["config"], finetuned_from=args.weights, finetune_squares=[p.name for p in folders],
                finetune_steps=args.steps, finetune_hard=[args.hard_frac, args.hard_weight],
                finetune_unfreeze=args.unfreeze, finetune_levir_batch=n_lev,
-               finetune_aug=[args.misalign_m, args.shadow_p])
+               finetune_aug=[args.misalign_m, args.shadow_p], finetune_seed=seed,
+               finetune_inst=[args.inst_ref_m2, args.inst_cap, args.inst_floor],
+               finetune_partner=[Path(args.levir).name, args.partner_dirs, args.partner_crop],
+               finetune_avg_last=[args.avg_last, n_avg])
     path = out / "dinov2_finetuned.pth"
+    if avg is not None:
+        torch.save(model.decoder.state_dict(), out / "decoder_last.pth")
+        print(f"averaged the weights of the last {n_avg} steps (from step {avg_from}); "
+              f"last-step decoder in {out / 'decoder_last.pth'}")
+        for m, mod in trained.items():
+            sd = mod.state_dict()
+            mod.load_state_dict({k: (avg[f"{m}.{k}"].to(v.dtype) if v.is_floating_point() else v)
+                                 for k, v in sd.items()})
     backbone = ck["backbone"]
     if free:
         cut = len(model.backbone.blocks) - args.unfreeze      # only the trained blocks change

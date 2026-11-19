@@ -27,6 +27,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 MODELS = {
     "dinov2_vitb14_c2s1_levir.pth": "dinov2_vitb14_c2s1_levir.decoder.pth",
     "dinov2_vitb14_finetuned.pth": "dinov2_vitb14_finetuned.decoder.pth",
+    "dinov2_vitb14_finetuned_s2l.pth": "dinov2_vitb14_finetuned_s2l.decoder.pth",
 }
 # used as they are, no backbone needed
 HEADS = ["landcover_dinov2_vitb14_oem_second.pth"]
