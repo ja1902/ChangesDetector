@@ -9,6 +9,7 @@ class UChangePlugin:
         self.iface = iface
         self.action = None
         self.dialog = None
+        self.provider = None
 
     def initGui(self):
         icon_path = os.path.join(os.path.dirname(__file__), "icon.png")
@@ -17,10 +18,19 @@ class UChangePlugin:
         self.action.triggered.connect(self.run)
         self.iface.addPluginToMenu("&ChangeDetection", self.action)
         self.iface.addToolBarIcon(self.action)
+        # Processing toolbox: batch runs and graphical models
+        from qgis.core import QgsApplication
+        from .processing_provider import ChangeDetectionProvider
+        self.provider = ChangeDetectionProvider()
+        QgsApplication.processingRegistry().addProvider(self.provider)
 
     def unload(self):
         self.iface.removePluginMenu("&ChangeDetection", self.action)
         self.iface.removeToolBarIcon(self.action)
+        if self.provider is not None:
+            from qgis.core import QgsApplication
+            QgsApplication.processingRegistry().removeProvider(self.provider)
+            self.provider = None
 
     def run(self):
         from .uchange_dialog import UChangeDialog

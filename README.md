@@ -70,6 +70,13 @@ Images are co-registered first (a shift of up to 50 px between the two dates is 
 and imagery coarser than 0.5 m is resampled to 0.5 m and the result written back at the
 original resolution.
 
+### Many pairs: the Processing toolbox
+
+The plugin also adds **ChangeDetection > Detect changes** to the Processing toolbox, with
+the same options (model, area, filter, minimum area, Fast mode, device). Right-click it and
+choose **Execute as Batch Process** to run many image pairs in one go, or use it in the
+graphical modeler. Results get the same styling as from the dialog.
+
 ### Output
 
 One feature per change, with:
@@ -83,7 +90,9 @@ One feature per change, with:
 | `filter_score` | the false-alarm filter's probability that the change is real; sort by it to review the borderline ones first |
 | `area` | area in map units² |
 
-A change can have several parts (a MultiPolygon). In semantic mode, changes whose land
+Binary results are outlined by `filter_score`: red (likely real, 0.70 and up), orange
+(0.50-0.70), dashed yellow (under 0.50, when "keep if real" is lowered). A change can have
+several parts (a MultiPolygon). In semantic mode, changes whose land
 cover is the same on both dates (mostly construction sites) read e.g. "paved / road (class
 unchanged)" and are drawn as "change, type unclear". Semantic mode also saves before and
 after land-cover rasters next to the GeoPackage.

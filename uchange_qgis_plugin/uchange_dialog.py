@@ -63,6 +63,33 @@ def _style_changes(layer):
     layer.setRenderer(QgsGraduatedSymbolRenderer("filter_score", ranges))
 
 
+def _style_labelled(layer):
+    """Labelled change: coloured by what each change became; dashed white when the land
+    cover is the same on both dates (a change the classes can't name)."""
+    categories = []
+    for name, (r, g, b) in zip(LANDCOVER_CLASSES[1:], LANDCOVER_PALETTE[1:]):
+        symbol = QgsSymbol.defaultSymbol(layer.geometryType())
+        fill = QgsSimpleFillSymbolLayer()
+        fill.setColor(QColor(r, g, b, 90))
+        fill.setStrokeColor(QColor(r, g, b))
+        fill.setStrokeWidth(0.6)
+        symbol.changeSymbolLayer(0, fill)
+        categories.append(QgsRendererCategory(name, symbol, f"became {name}"))
+    # Same class on both dates: a detected change the land-cover classes can't
+    # name (e.g. a flat roof read as paving), not "became <class>".
+    symbol = QgsSymbol.defaultSymbol(layer.geometryType())
+    fill = QgsSimpleFillSymbolLayer()
+    fill.setColor(QColor(255, 255, 255, 60))
+    fill.setStrokeColor(QColor(255, 255, 255))
+    fill.setStrokeWidth(0.6)
+    fill.setStrokeStyle(Qt.DashLine)
+    symbol.changeSymbolLayer(0, fill)
+    categories.append(QgsRendererCategory(_UNCLEAR, symbol, "change, type unclear"))
+    layer.setRenderer(QgsCategorizedSymbolRenderer(
+        f"CASE WHEN \"from_class\" = \"to_class\" THEN '{_UNCLEAR}' ELSE \"to_class\" END",
+        categories))
+
+
 class _Stopped(Exception):
     """The user stopped the run."""
 
@@ -972,28 +999,7 @@ class UChangeDialog(QDialog):
         layer = QgsVectorLayer(gpkg_path, "Labelled change", "ogr")
         if not layer.isValid():
             return
-        categories = []
-        for name, (r, g, b) in zip(LANDCOVER_CLASSES[1:], LANDCOVER_PALETTE[1:]):
-            symbol = QgsSymbol.defaultSymbol(layer.geometryType())
-            fill = QgsSimpleFillSymbolLayer()
-            fill.setColor(QColor(r, g, b, 90))
-            fill.setStrokeColor(QColor(r, g, b))
-            fill.setStrokeWidth(0.6)
-            symbol.changeSymbolLayer(0, fill)
-            categories.append(QgsRendererCategory(name, symbol, f"became {name}"))
-        # Same class on both dates: a detected change the land-cover classes can't
-        # name (e.g. a flat roof read as paving), not "became <class>".
-        symbol = QgsSymbol.defaultSymbol(layer.geometryType())
-        fill = QgsSimpleFillSymbolLayer()
-        fill.setColor(QColor(255, 255, 255, 60))
-        fill.setStrokeColor(QColor(255, 255, 255))
-        fill.setStrokeWidth(0.6)
-        fill.setStrokeStyle(Qt.DashLine)
-        symbol.changeSymbolLayer(0, fill)
-        categories.append(QgsRendererCategory(_UNCLEAR, symbol, "change, type unclear"))
-        layer.setRenderer(QgsCategorizedSymbolRenderer(
-            f"CASE WHEN \"from_class\" = \"to_class\" THEN '{_UNCLEAR}' ELSE \"to_class\" END",
-            categories))
+        _style_labelled(layer)
         QgsProject.instance().addMapLayer(layer)
         self._log("Layer 'Labelled change' added (colour = what it became; dashed white = "
                   "change whose type is unclear; see the 'change' field for from -> to).")
