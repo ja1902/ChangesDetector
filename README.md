@@ -20,6 +20,13 @@ A research project exploring automated change detection between georeferenced sa
   Fast mode, under a minute on a GPU). The dialog and the CLI now say how long to expect for
   the area chosen. The false-alarm filter judges four changes per pass: same scores, about a
   fifth faster.
+- **Minimum change area in m²**: the dialog's minimum area is now in square metres
+  (CLI `--min-area-m2`), so it means the same on 0.4 m and 0.5 m imagery; `--min-area` in
+  pixels still works.
+- **The dialog runs each model with its tested tile settings**: it used to send tile overlap
+  32, overriding the tested 64 in every QGIS run; results in QGIS now match the CLI.
+- **"Match image histograms" removed from the dialog**: with the current models it finds
+  fewer changes (see below); `--histogram-match` still exists.
 
 ### The filter also judges weaker changes
 
@@ -436,7 +443,7 @@ The backbone file can be deleted afterwards. The trained weights are for researc
 python detect_changes.py --before before.tif --after after.tif --output-gpkg changes.gpkg
 
 # Labelled change: polygons with from_class / to_class / change / area
-python detect_changes.py --before before.tif --after after.tif --mode semantic     --output-gpkg labelled.gpkg --min-area 20
+python detect_changes.py --before before.tif --after after.tif --mode semantic     --output-gpkg labelled.gpkg --min-area-m2 5
 
 # Only part of the image (coordinates of the before raster)
 python detect_changes.py --before before.tif --after after.tif --extent 500000,4000000,500500,4000500 --output-gpkg area.gpkg
@@ -448,7 +455,7 @@ python detect_changes.py --before before.tif --after after.tif --preset finetune
 python detect_changes.py --before before.tif --after after.tif     --weights dinov2_vitb14_c2s1_levir.pth --preset synthetic --output-gpkg changes.gpkg
 ```
 
-Options: `--mode binary|semantic`, `--model-type dinov2|ensemble|dinov2_lc`, `--weights path/to/weights.pth`, `--preset finetuned|finetuned_s2l|synthetic|ensemble`, `--no-filter-false-alarms`, `--filter-min-score 0.46`, `--no-filter-orphans`, `--extent XMIN,YMIN,XMAX,YMAX`, `--threshold auto|0.3`, `--target-gsd 0.5`, `--min-area 20`, `--histogram-match`, `--tile-size 252`, `--overlap 64`, `--no-coreg`, `--max-shift 50`, `--coreg-window 1024`, `--device auto|cpu|gpu`, `--max-vram 1024`, `--fast`, `--tta-gate 0.5`
+Options: `--mode binary|semantic`, `--model-type dinov2|ensemble|dinov2_lc`, `--weights path/to/weights.pth`, `--preset finetuned|finetuned_s2l|synthetic|ensemble`, `--no-filter-false-alarms`, `--filter-min-score 0.46`, `--no-filter-orphans`, `--extent XMIN,YMIN,XMAX,YMAX`, `--threshold auto|0.3`, `--target-gsd 0.5`, `--min-area-m2 50` (or `--min-area 20` in pixels), `--histogram-match`, `--tile-size 252`, `--overlap 64`, `--no-coreg`, `--max-shift 50`, `--coreg-window 1024`, `--device auto|cpu|gpu`, `--max-vram 1024`, `--fast`, `--tta-gate 0.5`
 
 ### Training
 

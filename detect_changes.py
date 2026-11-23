@@ -239,7 +239,10 @@ def build_parser():
     parser.add_argument("--output-gpkg", default=None,
                         help="Polygonize binary mask and save as GeoPackage (binary mode only)")
     parser.add_argument("--min-area", type=int, default=0,
-                        help="Minimum polygon area in pixels (used with --output-gpkg)")
+                        help="Minimum change area in pixels (used with --output-gpkg)")
+    parser.add_argument("--min-area-m2", type=float, default=None,
+                        help="Minimum change area in square metres (replaces --min-area; "
+                             "needs georeferenced images)")
     parser.add_argument("--style", choices=["exact", "simplified", "convex"],
                         default="exact",
                         help="Polygon simplification style (used with --output-gpkg)")
@@ -551,6 +554,14 @@ def main():
 
     h, w = before_img.shape[:2]
     _log(f"Image size: {w}x{h}")
+    if args.min_area_m2:
+        from uchange_qgis_plugin.resolution import pixel_size_m
+        px_m = pixel_size_m(before_geo or after_geo)
+        if px_m:
+            args.min_area = args.min_area_m2 / (px_m * px_m)       # in pixels from here on
+            _log(f"Minimum change area: {args.min_area_m2:g} m2 ({args.min_area:.0f} pixels)")
+        else:
+            _log("Minimum change area in m2 ignored: the images are not georeferenced")
     thresh_str = "auto" if args.auto_threshold else f"{args.threshold}"
     if args.filter_false_alarms and threshold_was_auto:
         thresh_str = "set by the false-alarm filter"

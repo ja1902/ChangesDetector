@@ -230,10 +230,13 @@ class UChangeDialog(QDialog):
         proc_form.addRow("", self.threshold_widget)
 
         self.min_area = QSpinBox()
-        self.min_area.setRange(0, 10000)
+        self.min_area.setRange(0, 100000)
+        self.min_area.setSingleStep(10)
         self.min_area.setValue(0)
-        self.min_area.setSuffix(" px")
-        proc_form.addRow("Min polygon area:", self.min_area)
+        self.min_area.setSuffix(" m\u00b2")
+        self.min_area.setSpecialValueText("No minimum")
+        self.min_area.setToolTip("Drop changes smaller than this on the ground (all parts of a change together).")
+        proc_form.addRow("Min change area:", self.min_area)
 
         proc_group.setLayout(proc_form)
         layout.addWidget(proc_group)
@@ -721,7 +724,8 @@ class UChangeDialog(QDialog):
             if not gpkg_path.endswith(".gpkg"):
                 gpkg_path = os.path.splitext(gpkg_path)[0] + ".gpkg"
             cmd.extend(["--output-gpkg", gpkg_path])
-            cmd.extend(["--min-area", str(self.min_area.value())])
+            if self.min_area.value():
+                cmd.extend(["--min-area-m2", str(self.min_area.value())])
 
         if not self.coregister_check.isChecked():
             cmd.append("--no-coreg")
