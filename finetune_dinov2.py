@@ -223,6 +223,49 @@ class Partner(CDDataset):
         return super()._augment(a, b, label)
 
 
+class NullPairs(Partner):
+    """Null pairs: one place seen from two look angles minutes apart, so nothing changed.
+
+    root holds <view>/<chip>.png (RGB at 0.5 m) and <view>/<chip>_valid.png per view, and
+    manifest.json (views and their nadir angles, chips), as written by
+    work_dirs/exp_null/prepare.py from SpaceNet MVOI. Each item: a random chip, two different
+    views of it, a src_crop window that is at least 98% valid in both, label all "no change";
+    then the partner's own augmentation (resize to 518, flips).
+    """
+
+    def __init__(self, root, src_crop=370, per_chip=20):
+        import json
+        self.root = Path(root)
+        man = json.loads((self.root / "manifest.json").read_text())
+        self.views, self.chips = sorted(man["views"]), man["chips"]
+        self.crop_size, self.augment, self.src_crop = 518, True, src_crop
+        self.fda_beta, self.fda_target_images = 0.05, []
+        self.length = len(self.chips) * per_chip
+        print(f"  [null pairs] {len(self.chips)} chips x {len(self.views)} views in {self.root}")
+
+    def __len__(self):
+        return self.length
+
+    def __getitem__(self, idx):
+        chip = self.chips[np.random.randint(len(self.chips))]
+        va, vb = np.random.choice(self.views, 2, replace=False)
+        a = np.array(Image.open(self.root / va / f"{chip}.png").convert("RGB"))
+        b = np.array(Image.open(self.root / vb / f"{chip}.png").convert("RGB"))
+        ok = (np.array(Image.open(self.root / va / f"{chip}_valid.png")) > 0) & \
+             (np.array(Image.open(self.root / vb / f"{chip}_valid.png")) > 0)
+        c = self.src_crop
+        h, w = ok.shape
+        top = left = 0
+        for _ in range(20):
+            top, left = np.random.randint(0, h - c + 1), np.random.randint(0, w - c + 1)
+            if ok[top:top + c, left:left + c].mean() >= 0.98:
+                break
+        a, b = a[top:top + c, left:left + c], b[top:top + c, left:left + c]
+        label = np.zeros(a.shape[:2], np.uint8)
+        a, b, label = CDDataset._augment(self, a, b, label)
+        return self._to_tensor(a), self._to_tensor(b), torch.from_numpy(label).long()
+
+
 def forward_partial(model, a, b, n_free):
     """The detector's forward, with gradients through DINOv2's last n_free blocks."""
     bb = model.backbone
@@ -260,6 +303,11 @@ def main():
                     help="before,after folder names inside <--levir>/train (S2Looking: Image1,Image2)")
     ap.add_argument("--partner-crop", type=int, default=0,
                     help="cut this many px from each partner tile before resizing to 518 (0 = as LEVIR: off)")
+    ap.add_argument("--null", default=None,
+                    help="null pairs folder (work_dirs/exp_null/views): same place, two look angles, no change")
+    ap.add_argument("--null-p", type=float, default=0.0,
+                    help="share of steps whose partner crops are null pairs instead (0 = off)")
+    ap.add_argument("--null-crop", type=int, default=370, help="null-pair window in px at 0.5 m, resized to 518")
     ap.add_argument("--weights", default="dinov2_vitb14_c2s1_levir.pth")
     ap.add_argument("--out", default="work_dirs/finetune_gee")
     ap.add_argument("--steps", type=int, default=3000)
@@ -334,6 +382,11 @@ def main():
                                       batch_size=n_lev, shuffle=True, num_workers=args.workers,
                                       drop_last=True, generator=torch.Generator().manual_seed(seed + 1))
     own_it, lev_it = endless(own), endless(lev)
+    null_it, null_rng = None, random.Random(seed + 2)
+    if args.null and args.null_p > 0:
+        null_it = endless(torch.utils.data.DataLoader(NullPairs(args.null, args.null_crop), batch_size=n_lev,
+                                                      shuffle=True, num_workers=args.workers, drop_last=True,
+                                                      generator=torch.Generator().manual_seed(seed + 3)))
 
     groups = [{"params": list(model.decoder.parameters()), "lr": args.lr}]
     if free:
@@ -352,7 +405,7 @@ def main():
     t0, run = time.time(), {"own": 0.0, "levir": 0.0}
     for step in range(1, args.steps + 1):
         oa, ob, ol, oh, ow = next(own_it)
-        la, lb, ll = next(lev_it)
+        la, lb, ll = next(null_it) if null_it is not None and null_rng.random() < args.null_p else next(lev_it)
         a = torch.cat([oa, la]).to(device).half()
         b = torch.cat([ob, lb]).to(device).half()
         lab = torch.cat([ol, ll]).to(device)
@@ -395,7 +448,8 @@ def main():
                finetune_aug=[args.misalign_m, args.shadow_p], finetune_seed=seed,
                finetune_inst=[args.inst_ref_m2, args.inst_cap, args.inst_floor],
                finetune_partner=[Path(args.levir).name, args.partner_dirs, args.partner_crop],
-               finetune_avg_last=[args.avg_last, n_avg])
+               finetune_avg_last=[args.avg_last, n_avg],
+               finetune_null=[Path(args.null).name if args.null else None, args.null_p, args.null_crop])
     path = out / "dinov2_finetuned.pth"
     if avg is not None:
         torch.save(model.decoder.state_dict(), out / "decoder_last.pth")

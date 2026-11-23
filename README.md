@@ -20,7 +20,9 @@ on the same custom dataset, but alongside S2Looking (off-angle satellite pairs)
 instead of LEVIR-CD, with its own false-alarm filter. It may suit oblique imagery
 and leaning buildings: on the 13 areas it finds more changes overall (70% against 66%
 with the filter, averaged over 5-28 false alarms / km2), with large gains in some areas
-and a clear loss in others, so it does not replace the recommended model. Binary mode
+and a clear loss in others, so it does not replace the recommended model. On two pairs
+from outside the training data it was level with the recommended model on one and slightly
+worse on the other (16 against 19 changes found at the default setting). Binary mode
 now lists it between the two others. Try it if the recommended model misses changes.
 From the command line: `--preset finetuned_s2l`. The installer builds it like the other
 models (one more 35 MB decoder in `weights/`).

@@ -249,7 +249,7 @@ also flags newly ploughed fields or filled pools). Costs about 11 s per km² on 
 
 ## November 2026: what more can be found (v0.10)
 
-Eight ideas were tested against fixed bars, each on squares the model was not trained on
+Fourteen ideas were tested against fixed bars, each on squares the model was not trained on
 (leave one city out). Score: "curve mean" = share of real changes found, averaged over
 5-28 false alarms per km2; a win needed +3 points with a bootstrap interval (over 200 m
 cells) clear of zero. Before that, the unjudged detections counted as false alarms were
@@ -262,6 +262,12 @@ reviewed blind (about 400 panels): over half were real changes, so the baseline 
 | teaching the filter a pair from its sibling square's verdicts | level |
 | height from a monocular depth model (Depth Anything V2 Small) | level |
 | instance-balanced loss (small changes weigh more in training) | level, inside run-to-run noise |
+| small set-aside candidates reviewed and used in training (405 blind panels: 142 real, 250 not) | level: two seeds -2.4 to +0.9 against both baselines; small changes not found more often |
+| finer view at inference (2.0x upsampling instead of 1.4x, about 3 m per patch instead of 4.5 m) | worse: -7.8 [-10.2, -4.7] with the filter on 13 squares, small changes too; a +3.5 on 4 squares did not hold |
+| averaging the two models' maps (LEVIR-CD and S2Looking partners) | +1.3 over the recommended model but -2.6 [-4.5, -1.1] against the S2Looking model alone, at twice the run time |
+| match certainty from a wide-baseline matcher (RoMa) as filter input | level: +0.0 [-1.2, +1.8] (-2.0 on the verdicts before the blind review); the filter's own ranking improved, the end result did not |
+| null pairs: 6 SpaceNet-4 views (7-32 deg off nadir) of 200 places, all "no change", as a quarter of the training crops | level: without the filter +9.0 and +8.7 (two seeds; small changes found twice as often), but with the filter -3.5 to +2.4 against the baselines and -4.0 / -7.8 against the S2Looking model. The filter already removes the lean false alarms the pairs teach the model to avoid |
+| null pairs on top of the S2Looking recipe | level against the S2Looking model: without the filter +5.8 and +4.0, with it -2.8 to +2.5 (two seeds against two) |
 | **weaker changes judged by the filter** (peaks >= 0.45 outside the detections) | **+3.8** [+2.5, +5.5] on 13 squares, 964 changes; found at 20 FA/km2 73% -> 80%, under 100 m2 191 -> 232 of 335 |
 | **S2Looking instead of LEVIR-CD as the training partner** | **+4.0** [+1.7, +6.4] with the filter (threshold only +6.3); by place of the training data, found at 10 FA/km2: 49% -> 72% and 64% -> 76% on two, 73% -> 55% on a third |
 | both together | +4.9 [+2.6, +7.8]; only +1.1 over the weaker changes alone: both win the same small changes |
@@ -277,9 +283,6 @@ that one loss. Its false-alarm filter keeps the shared first stage and refits th
 on its own held-out maps. Retrain it with `finetune_dinov2.py --levir <S2Looking>
 --partner-dirs Image1,Image2 --partner-crop 370 --seed 1` on all 13 squares.
 
-Not tried yet: null pairs (SpaceNet-4 off-nadir views, zero change), a learned matcher's
-certainty as a filter input, relabelling the small set-aside candidates of the training
-squares.
 
 ## Caveats
 
