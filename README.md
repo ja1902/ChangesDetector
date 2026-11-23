@@ -1,497 +1,193 @@
 # Changes Detector
 
-A research project exploring automated change detection between georeferenced satellite images, delivered as a QGIS plugin.
-
-## What changed (v0.10)
-
-### Process only an area, one feature per change (v0.10.1)
-
-- **Process only an area**: the dialog has a "Process only an area" box (the current map
-  view, a layer's extent, or a rectangle drawn on the map); CLI `--extent XMIN,YMIN,XMAX,YMAX`
-  in the before raster's coordinates. Both rasters are cut to that area before anything
-  else runs. On a test pair, a 500 m area found every change a whole-image run found there
-  (and one more); outlines can differ slightly because the tiles fall in different places.
-- **One feature per change**: redrawing a kept change at the filter's stricter outline could
-  split it into pieces (on one test pair 22 changes came out as 42 polygons, one site in 13).
-  Each change is now a single feature (a MultiPolygon when it has several parts), in binary
-  and labelled mode, and `--min-area` applies to the whole change. Pixels and scores are
-  unchanged.
-- **Without a GPU**: a km² takes about half an hour on a 24-thread CPU (about 18 minutes with
-  Fast mode, under a minute on a GPU). The dialog and the CLI now say how long to expect for
-  the area chosen. The false-alarm filter judges four changes per pass: same scores, about a
-  fifth faster.
-- **Minimum change area in m²**: the dialog's minimum area is now in square metres
-  (CLI `--min-area-m2`), so it means the same on 0.4 m and 0.5 m imagery; `--min-area` in
-  pixels still works.
-- **The dialog runs each model with its tested tile settings**: it used to send tile overlap
-  32, overriding the tested 64 in every QGIS run; results in QGIS now match the CLI.
-- **"Match image histograms" removed from the dialog**: with the current models it finds
-  fewer changes (see below); `--histogram-match` still exists.
-
-### The filter also judges weaker changes
-
-Small changes often never reach the model's 0.6 level, so the filter never saw them.
-It now also looks at the local peaks of the change map that reach 0.45 outside the
-detected changes, judges each the same way, and keeps the ones it trusts as much as
-the others. On the all areas of the custom dataset this raises the share found at 20 false alarms / km2 from 73% to
-80%, mostly changes under 100 m2; at the default "keep if real" it changes little,
-so lower that setting to see the gain. `--no-filter-orphans` turns it off.
-
-### An alternative model for oblique imagery
-
-**DINOv2 ViT-B finetuned, S2Looking (oblique imagery)** is the same model finetuned
-on the same custom dataset, but alongside S2Looking (off-angle satellite pairs)
-instead of LEVIR-CD, with its own false-alarm filter. It may suit oblique imagery
-and leaning buildings: on the 13 areas it finds more changes overall (70% against 66%
-with the filter, averaged over 5-28 false alarms / km2), with large gains in some areas
-and a clear loss in others, so it does not replace the recommended model. On two pairs
-from outside the training data it was level with the recommended model on one and slightly
-worse on the other (16 against 19 changes found at the default setting). Binary mode
-now lists it between the two others. Try it if the recommended model misses changes.
-From the command line: `--preset finetuned_s2l`. The installer builds it like the other
-models (one more 35 MB decoder in `weights/`).
-
-## What changed (v0.9)
-
-### New default model: DINOv2 ViT-B finetuned
-
-**DINOv2 ViT-B finetuned** (`dinov2_vitb14_finetuned.pth`) is the recommended
-model's decoder
-
-What it brings:
-
-- **More kinds of change.** Besides new buildings it finds construction sites,
-  demolitions and cleared land.
-- **A false-alarm filter, on by default.** Most false alarms on high-resolution
-  imagery are tall buildings leaning differently between the two dates and shadows
-  that moved. The filter takes a second look at every detected change: a classifier
-  on the frozen DINO features of its before and after crops, trained on 1,711
-  hand-checked detections, judges whether it is a real change, and those judged false
-  are dropped. Kept changes are outlined at the model's usual threshold.
-  (`uchange_qgis_plugin/falsealarm_filter.py`, `weights/falsealarm_filter_finetuned.npz`.)
-
-Results, on 8 areas of the custom dataset, each scored by a model that was trained
-without that area (share of real changes found):
-
-| | at 10 false alarms / km2 | at 20 false alarms / km2 |
-|---|---|---|
-| synthetic data (previous default) | 47% | 58% |
-| finetuned | 60% | 71% |
-| **finetuned + false-alarm filter (default)** | **69%** | **76%** |
-
-On a new area that neither the model nor the filter had seen (23 changes), the
-plugin with its default settings finds 18 changes with 21 false alarms / km2;
-without the filter, 19 with 52. The filter removes about 60% of the false alarms
-and loses one real change.
-
-In the dialog, **"keep if real"** (default 0.46) sets how sure the filter must be:
-lower keeps more changes and more false alarms (0.30: 77% found with 22 false
-alarms / km2 on the 8 areas). Untick **"Filter false alarms"** to see everything the
-model finds at its threshold (0.85). From the command line: `--preset finetuned`,
-`--filter-min-score P`, `--no-filter-false-alarms`.
-
-On the public test sets, which label new buildings only, the finetuned model scores
-lower than the previous default, partly because it also flags construction sites
-and cleared land. If you only need new buildings, the previous default stays
-available as **DINOv2 ViT-B + synthetic data (general)**.
-
-### Labelled change uses the finetuned model and filter
-
-Labelled (from -> to) mode now finds its changes with the finetuned model and the
-false-alarm filter, so it gets the same gains as binary mode. The land-cover head
-reads only the frozen DINOv2 backbone, so the from/to classes are unchanged; it is the
-set of changes that improves. Its polygons are exactly the binary-mode polygons.
-
-Some changes have the same land cover on both dates, mostly construction sites (no
-class of their own) and some new flat roofs read as paving: about 1 in 8 of the real
-changes on the custom dataset. They are real detections whose type is unclear, so
-their `change` field reads e.g. "paved / road (class unchanged)" and QGIS draws them
-dashed white as "change, type unclear", not as "became paved / road". On the custom
-dataset, 77% of new buildings are named "... -> building".
-
-### A score on every polygon
-
-Every output polygon (binary and labelled) now carries:
-
-- `confidence`: the mean change probability inside it (0-1).
-- `filter_score`: with the false-alarm filter, its probability of being a real change
-  (kept if at least "keep if real", default 0.46). Sort by it to review the borderline
-  ones first. A detection redrawn as several polygons gives them all its score.
-- `area`, and `id` (labelled polygons: `id` replaces the old `blob` field).
-
-### Two binary models
-
-Binary mode now lists two models: **DINOv2 ViT-B finetuned** (recommended) and
-**DINOv2 ViT-B + synthetic data (general)**. The Changen2 ViT-L ensemble and the two
-v0.6 DINOv2 models are no longer in the plugin. The CLI still runs the Changen2
-ensemble (`--model-type ensemble --preset ensemble`) for research. The installer no
-longer sets up Changen2 by default (`INSTALL_CHANGEN2=1 ./install.sh` adds it) and no
-longer builds the v0.6 model files.
-
-
-
-## What changed (v0.8)
-
-### Less GPU memory and RAM, faster (v0.8.3)
-
-Same results as v0.8.2 (on 400 labelled test pairs from S2Looking and LEVIR-CD, scores are identical and 0.001% of pixels change side), measured on a T4:
-
-| | v0.8.2 | v0.8.3 |
-|---|---|---|
-| Recommended DINOv2 model, 4096 x 4096 px: GPU memory | 4.3 GB | 1.3 GB |
-| same, inference time | 1x | 1.6x faster |
-| Changen2 ensemble, 2048 x 2048 px: GPU memory | 3.5 GB | 3.0 GB |
-| same, inference time | 1x | 1.3x faster |
-| 64-megapixel scene: peak RAM | 3.0 GB | 0.9 GB |
-
-- Flip averaging runs only on tiles where the first pass finds a likely change (probability 0.5 or more); the rest keep the single pass. `--tta-gate 0` averages every tile as before.
-- The DINOv2 models now run on GPUs with 1 GB of memory: the batch size follows the free memory (8 tiles at most, where the GPU stops getting faster) and halves if the GPU runs out. The Changen2 ensemble needs about 3.5 GB: it now runs in float16, and its attention no longer peaks at ~10 GB.
-- **GPU memory limit** in the dialog (CLI: `--max-vram MB`) for small or shared GPUs; same results, a little slower under a tight limit.
-- Large rasters are processed one strip at a time, and the comparison preview is capped at 2048 px.
-
-### Labelled change: what changed into what
-
-Semantic mode has a new recommended model, **DINOv2 ViT-B + land cover, from -> to**. The v0.7 DINOv2 model finds the changes; a land-cover head on the same frozen backbone (trained on OpenEarthMap, 44 countries, plus SECOND) classifies each date. Every change polygon gets one before class and one after class (the majority inside it) and is written to a GeoPackage with the fields `from_class`, `to_class`, `change` (e.g. "farmland -> building") and `area`. Classes: bare ground, grass / low vegetation, paved / road, trees, water, farmland, building. The layer is coloured by what each area became.
-
-Share of truly changed pixels whose before *and* after class are right:
-
-| | SECOND (China) | HRSCD (France, never seen) |
-|---|---|---|
-| SCD UPerNet (v0.7) | 60% | 40% |
-| **DINOv2 + land cover (v0.8)** | **63%** | **50%** |
-
-Changes are found by the building-focused v0.7 model, so this mode suits building and urban change: on the French data it found changes far better than the UPerNet (IoU 0.22 vs 0.05). Changes that involve no building, such as forest cleared for farmland, are largely missed. Needs `landcover_dinov2_vitb14_oem_second.pth` (the installer sets it up). CLI: `--model-type dinov2_lc --preset synthetic --threshold auto --output-gpkg out.gpkg`.
-
-### Fast mode
-
-A **Fast mode** checkbox (CLI: `--fast`) for the recommended binary and labelled-change models skips flip averaging: about 2x faster, slightly less accurate. It keeps the 1.4x upscaling (`--scale 1.0` drops that too; `--no-tta` / `--tta` set flip averaging directly).
-
-### Models dropped
-
-ChangerEx (R18) and the SCD UPerNet (R18) are no longer installed or listed: the DINOv2 models beat ChangerEx on every unseen dataset tested, and the new labelled-change mode replaces the SCD UPerNet for building and urban change. Their weights stay on the [v0.6.0 release](https://github.com/ja1902/ChangesDetector/releases/tag/v0.6.0), and the CLI still runs them with `--model-type opencd` / `--model-type opencd_scd --mode semantic`.
-
-### Fixes
-
-- **Weights from the official source**: the DINOv2 models only train a decoder on Meta's frozen DINOv2 ViT-B/14, so the installer now downloads that backbone once (346 MB) from Meta's official release and combines it with the trained decoders, which ship in this repository's `weights/` folder. This replaces three 382 MB downloads from the GitHub release; the resulting files are identical.
-- **CPU**: DINOv2 models crashed on computers without an NVIDIA GPU (float16 weights, float32 inputs); they now run in float32 on CPU.
-- **Installer**: a failed weight download no longer stops the installer. It now checks GDAL's NumPy support after building the bindings, and installs Changen2 support and its weights by default (`INSTALL_CHANGEN2=0 ./install.sh` skips it).
-- **GeoTIFFs on some Linux installs**: when GDAL's Python bindings were built without NumPy support (`No module named '_gdal_array'`), GeoTIFFs were silently read without georeferencing and writing polygons failed. Rasters are now read and written without that module, and a failed GDAL read is reported instead of hidden.
-- **CLI defaults**: with no model given, `detect_changes.py` now runs the recommended DINOv2 model with its tested settings (it used to default to ChangerEx).
-
-## What changed (v0.7)
-
-v0.7 targets three problems: working on new regions, sensors and resolutions without retraining; false alarms on angled (off-nadir) imagery; and naming what changed into what.
-
-### New default model: DINOv2 + synthetic change data
-
-Same architecture and file format as the v0.6 DINOv2 model, but the decoder is trained on [Changen2](https://github.com/Z-Zheng/pytorch-change-models) synthetic change pairs plus LEVIR-CD (`dinov2_vitb14_c2s1_levir.pth`). IoU on test sets, with each model's threshold picked on a *different* unseen dataset (the fair setting for new imagery; v0.6's own auto-threshold scored lower, e.g. 0.20 on S2Looking):
-
-| IoU | S2Looking | LEVIR-CD |
-|---|---|---|
-| v0.6 DINOv2 (generalizable) | 0.27 | 0.84 |
-| **v0.7 DINOv2 + synthetic** | **0.35** | 0.76-0.80 |
-| v0.7 Changen2 ViT-L + DINOv2 (optional) | **0.40** | 0.80 |
-
-At the same detection rate it raises about 4x fewer false alarms than v0.6 on imagery of the same place seen from different angles (SpaceNet MVOI). Trained on CC BY-NC-SA 4.0 data: research / non-commercial use.
-
-### Each model runs the way it was tested
-
-Models now carry a preset: 1.4x upscaling, flip averaging, logit adjustment and a threshold chosen on imagery the model had not seen. The "Change threshold" box is now **Recommended**: for preset models it uses that tested threshold, not the per-scene estimate (which reached only ~70% of the best possible IoU on unfamiliar data). CLI: `--preset synthetic` or `--preset ensemble` with `--threshold auto`.
-
-### Coarse imagery is resampled automatically
-
-Every model collapses on imagery much coarser than it was trained on (2 m LEVIR: IoU about 0.1). Rasters whose pixel size is coarser than 0.5 m are now resampled to 0.5 m before detection, and results are written at the original resolution. On 2 m test GeoTIFFs this took the new model from 0.39 to 0.73 IoU. CLI: `--target-gsd 0.5` (0 to turn off).
-
-### Optional: Changen2 ViT-L + DINOv2 (most accurate)
-
-Runs the Changen2 ChangeStar ViT-L model alongside the DINOv2 model and keeps only change both agree on. The installer sets up the `torchange` package and downloads the weights from huggingface.co by default (`INSTALL_CHANGEN2=0` skips this, and the plugin then prints install instructions). It is slower; ChangeStar weights are CC BY-NC-SA 4.0.
-
-### Fixes
-
-- **Semantic change legend**: the SCD UPerNet's outputs were shown with the wrong class names (low vegetation as "water", tree as "low vegetation", water as "tree"). With the corrected order its SeK on SECOND rises from 0.13 to 0.20.
-- **Newer GPUs**: DINOv2 models failed on RTX 30-series and newer (float16 weights under bfloat16 autocast); autocast now follows the model's precision.
-
-## What changed (v0.6)
-
-CNN-based models like ChangerEx are **domain-locked** -- they achieve high F1 on in-domain data but fail on imagery from different regions or sensors. This version tackles that problem with a **DINOv2 vision transformer** for **generalizable change detection**. After 21 experiments (see [EXPERIMENTS.md](EXPERIMENTS.md)), the key finding is a fundamental trade-off between in-domain accuracy and cross-domain generalization: techniques that improve performance on the training domain consistently hurt generalization to unseen domains. Frozen DINOv2 features with a simple FPN decoder emerged as the best balance -- sacrificing a few points of in-domain F1 for reliable cross-domain performance.
-
-### DINOv2 ViT-B/14
-
-- **Frozen DINOv2 backbone + 4-layer FPN decoder**, trained on LEVIR-CD
-- Two variants: **generalizable** (LEVIR-CD only) and **fine-tuned** (further tuned on another dataset). Fine-tuning improves accuracy on the target domain but hurts cross-domain generalization -- the same trade-off that applies at every level. The generalizable model is recommended for use on new/unseen regions. Try both to see which one performs better.
-- Standalone ViT implementation -- runs in the QGIS plugin without heavy ML framework installs
-- **Resolution-dynamic**: accepts any tile size (auto-crops to nearest multiple of 14). Default 256 becomes 252, giving ~4x fewer pixels per tile vs the fixed 518 that ViT-B/14 was trained on, with no accuracy loss
-- DINOv2 is now the **default model** in both the QGIS plugin and CLI
-
-### Auto-thresholding
-
-- **Automatic threshold selection** enabled by default -- no manual tuning needed
-- Models the unchanged distribution in log-probability space using a HWHM background model, sets threshold at 4.5 sigma above the unchanged peak
-- Recovers 98-100% of oracle IoU across different change prevalences and cross-domain shifts
-- Available via "Auto (recommended)" checkbox in QGIS and `--threshold auto` on the CLI
-
-### Histogram matching
-
-- Optional **per-tile histogram matching** (`--histogram-match`): each "after" tile's colours are
-  matched to the "before" tile
-- **Not recommended with the current models** and no longer in the dialog (v0.10.1): on the 13
-  areas of the training data it found fewer changes (-2.7 points with the false-alarm filter,
-  -7.3 without), small ones included, because matching a tile partly erases the change in it
-
-### Plugin UX improvements
-
-- **Threshold slider** (0.00-1.00) replaces the old spin box, with auto mode as default
-- **Default overlap** set to 32px for smoother tile boundaries
-- **Small hole removal** in output polygons -- interior holes smaller than the min-area filter are cleaned up automatically
-
-### DINOv2 training script
-
-- `train_dinov2_cd.py` -- standalone DINOv2 training pipeline, no OpenCD/mmengine dependency
-- Supports ViT-S/14, ViT-B/14, and ViT-L/14 backbones
-- Trains only the decoder (~9M params) with the backbone frozen -- requires ~4GB VRAM
-- Alternative to the OpenCD-based `finetune.py` -- no mmcv/mmengine dependency needed
-
-
-### Key findings from 21 experiments
-
-1. **Frozen DINOv2 + simple FPN + CE loss is optimal.** Everything that improves in-domain (Dice/Focal loss, backbone unfreezing, heavy augmentation, BAN decoder) hurts cross-domain generalization.
-2. **Satellite-pretrained backbones generalize worse**, not better. DINOv3 SAT, CrossEarth, DOFA, and AnySat all underperformed plain DINOv2.
-
-
-### Included Models
-
-| Model | Training Dataset | Architecture | Mode |
-|-------|-----------------|--------------|------|
-| **DINOv2 ViT-B/14 (generalizable)** | LEVIR-CD | Frozen ViT-B/14 + FPN decoder | Binary CD |
-| DINOv2 ViT-B/14 (fine-tuned) | LEVIR-CD + domain data | Frozen ViT-B/14 + FPN decoder | Binary CD |
-| ChangerEx (R18) | LEVIR-CD | ResNet-18 + FDAF | Binary CD |
-| SCD UPerNet (R18) | SECOND | UPerNet + ResNet-18 | Semantic CD |
-
-## What changed (v0.5)
-
-This version makes the plugin **compatible with Python 3.10 through 3.14**, so it works out of the box on both current Ubuntu LTS releases (22.04 with Python 3.10) and the latest (26.04 with Python 3.14). It also removes the dependency on the MMlab ecosystem (mmcv, mmseg, mmengine, open-cd) for inference.
-
-### Why remove MMlab?
-
-The original architecture used OpenCD/MMlab as the model framework. This worked but created significant friction:
-
-- **mmcv compiles CUDA C++ extensions at install time**, which must exactly match your PyTorch + CUDA versions. This was the #1 source of install failures.
-- **MMlab packages lag behind Python releases** -- they typically take months to support new versions. With Python 3.14 shipping as the default in Ubuntu 26.04, users would be stuck waiting.
-- **Version conflicts** -- mmcv 2.x requires mmseg 1.x requires mmengine 0.x, and they all have to match exactly.
-- **Size** -- mmcv + mmseg + opencd added 1-2 GB on top of PyTorch.
-
-The model code (ChangerEx and SCD UPerNet) is now self-contained within the plugin -- pure PyTorch with no framework dependencies. This cuts the install to just `pip install torch` plus standard scientific Python packages.
-
-### Subprocess-based inference
-
-Previously the QGIS plugin imported PyTorch directly inside QGIS's own Python process. This broke when the venv's Python version didn't match QGIS's Python (e.g. a Python 3.14 venv on a system where QGIS uses Python 3.10 -- the compiled C extensions are incompatible).
-
-Inference now runs as a **subprocess** via `detect_changes.py`, using the venv's own Python interpreter. QGIS's Python never loads PyTorch -- it just launches the subprocess and streams JSON progress back to the UI. This means the plugin works regardless of version mismatch between QGIS's Python and the venv's Python.
-
-### Installer improvements
-
-- `install.sh` now detects Python 3.10-3.14 and automatically selects the correct PyTorch CUDA variant (cu121 for Python ≤3.12, cu128 for Python 3.13+)
-- Checks for missing system packages (`python3-venv`, `libgdal-dev`, `build-essential`) and tells the user exactly what to install
-- Version pins relaxed for numpy and scipy so pre-built wheels are available on all supported Python versions
-
-## What changed (v0.4)
-
-This version adds **Semantic Change Detection (SCD)** as a selectable mode alongside the existing binary change detection. Instead of just detecting *where* change occurred, SCD classifies *what* the changed areas became -- water, ground, low vegetation, tree, building, or sports field.
-
-### Semantic Change Detection
-
-- New "Detection mode" selector in the plugin: **Binary Change Detection** or **Semantic Change Detection**
-- SCD uses a **SiamEncoder-MultiDecoder (UPerNet + ResNet-18)** trained on the [SECOND dataset](https://captain-whu.github.io/SCD/) (6 land-cover classes)
-- Outputs two GeoTIFF layers:
-  - **Binary Change** -- change/no-change mask
-  - **Semantic Change** -- land-cover classification of changed areas, transparent over unchanged areas so the satellite image shows through
-- Colour-coded legend in QGIS with class names (water, ground, low vegetation, tree, building, sports field)
-- CLI support: `python detect_changes.py --before img1.tif --after img2.tif --mode semantic`
-- Co-registration, tiled inference, and GPU acceleration all work with SCD
-
-## What changed (v0.3)
-
-This version adds **automatic image co-registration** using [AROSICS](https://github.com/GFZ/arosics), which corrects sub-pixel spatial misalignment between image pairs before change detection. Satellite images captured at different times often have small GPS/sensor offsets that produce false change detections along edges and boundaries. Co-registration eliminates this noise.
-
-### Co-registration
-
-- Integrated AROSICS global shift correction into both the QGIS plugin and the standalone CLI
-- Activates automatically when input images are georeferenced TIFFs with a valid CRS
-- Detects and corrects shifts up to 50px (configurable via `--max-shift`)
-- CRS compatibility pre-check with a clear error message if images need reprojection
-- Handles images with invalid nodata metadata (e.g. nodata=256 on uint8 bands) that would otherwise crash AROSICS
-
-### Tested impact
-
-On a real-world New Zealand 20cm aerial image pair (2012 vs 2016, 11265x15354px):
-
-| Scenario | Change detected |
-|----------|----------------|
-| Without co-registration | 2.70% |
-| **With co-registration** | **2.04%** |
-
-The ~0.7% difference is false positives caused by a 1.4px natural misalignment between captures. With a synthetic 10px shift applied, co-registration fully recovers the correct baseline (2.04%).
-
-
-## What changed (v0.2)
-
-The first version of this plugin shipped with **MambaBCD** (a state-space model) and **PeftCD** (DINOv3 + LoRA), which I selected based on their published benchmark scores and my own testing. I had looked at the models in the [Open-CD](https://github.com/likyoo/open-cd) repository but dismissed them -- they were older CNN architectures with similar reported F1 scores, and I assumed the newer approaches would be faster and more practical at inference time.
-
-However, after running a proper 18-model benchmark on the same hardware, **ChangerEx (R18)** -- a straightforward ResNet-18 Siamese encoder-decoder from Open-CD -- turned out to be dramatically faster and lighter than both MambaBCD and PeftCD, while matching them on accuracy. This version replaces both models with ChangerEx.
-
-### Why ChangerEx?
-
-ChangerEx uses a ResNet-18 backbone. Despite being simpler and older than the models it replaces, it dominates on the accuracy-efficiency tradeoff:
-
-| Model | F1 | Time (ms) | VRAM (MB) |
-|-------|-----|-----------|-----------|
-| **ChangerEx (R18)** | **0.918** | **59** | **448** |
-| PeftCD (DINOv3+LoRA) | 0.915 | 1,891 | 4,622 |
-| MambaBCD (VMamba) | 0.907 | 5,190 | 6,401 |
-
-- **30x faster** than PeftCD, **88x faster** than MambaBCD
-- **10x less VRAM** than PeftCD, **14x less** than MambaBCD
-- F1 within 0.3% of the best model tested (CGNet, 0.921)
-
-For full benchmark results and analysis, see [BENCHMARK_REPORT.md](BENCHMARK_REPORT.md).
-
-### Findings on generalization
-
-A central finding is that most change detection models are **domain-locked** -- they perform well on imagery similar to their training set but struggle on anything else. **The only reliable path to accurate results on a specific area is fine-tuning on labelled data from that region using the same image source.**
-
----
-
-## QGIS Plugin
-
-### Included Models
-
-| Model | Training Dataset | Architecture | Mode |
-|-------|-----------------|--------------|------|
-| **DINOv2 ViT-B finetuned (recommended)** | Changen2 synthetic + LEVIR-CD + custom dataset | Frozen ViT-B/14 + FPN decoder, false-alarm filter | Binary CD |
-| DINOv2 ViT-B finetuned, S2Looking (oblique imagery) | Changen2 synthetic + LEVIR-CD + S2Looking + custom dataset | Frozen ViT-B/14 + FPN decoder, false-alarm filter | Binary CD |
-| DINOv2 ViT-B + synthetic data (general) | Changen2 synthetic + LEVIR-CD | Frozen ViT-B/14 + FPN decoder | Binary CD |
-| **DINOv2 ViT-B + land cover, from -> to (recommended)** | finetuned model as above, land cover: OpenEarthMap + SECOND | Finetuned model + false-alarm filter + land-cover head | Labelled CD |
-
-### Prerequisites
+A QGIS plugin that finds what changed between two georeferenced satellite or aerial images
+of the same place: new buildings, construction sites, demolitions and cleared land. It
+outlines every change as a polygon, with a score for how likely it is to be real, and can
+also say what each area changed from and into ("farmland -> building").
+
+It runs on a GPU (under a minute per km² at 0.5 m) or on a CPU (about half an hour per km²),
+and inference runs in its own Python environment, so it works with any QGIS 3.22+.
+
+- What changed in each version: [CHANGELOG.md](CHANGELOG.md)
+- Every experiment and result behind the current models: [EXPERIMENTS.md](EXPERIMENTS.md)
+
+## What to expect
+
+The recommended model is DINOv2 (Meta's ViT-B/14, frozen) with a decoder finetuned on 13
+hand-checked areas of 1 km² of high-resolution imagery (0.4-0.5 m), followed by a
+**false-alarm filter**: a classifier, trained on 1,711 hand-checked detections, that takes
+a second look at every detected change and drops those that look like buildings leaning
+differently between the two dates or shadows that moved, the main false alarms at this
+resolution. It also judges weaker changes the model alone would miss.
+
+On the 13 areas, each scored by a model trained without that area, the default setup finds
+about 80% of the real changes at 20 false alarms per km². Large changes are found far more
+often than small ones: changes under 100 m² are the hardest. Results on your own imagery
+depend on how much it looks like the training data; the score on each polygon lets you
+review the borderline ones first.
+
+## Installation
+
+Requirements:
 
 - **Python 3.10-3.14** (Ubuntu 22.04-26.04 all supported)
-- **QGIS 3.22+** (any Python version -- the plugin runs inference in a subprocess)
-- **NVIDIA GPU** (recommended, CPU also supported)
-- **System packages**: `sudo apt install python3-venv python3-dev libgdal-dev build-essential`
-
-### Installation
+- **QGIS 3.22+** (any Python version: the plugin runs inference in a subprocess)
+- **NVIDIA GPU** recommended; CPU also works, more slowly
+- **System packages** (Linux): `sudo apt install python3-venv python3-dev libgdal-dev build-essential`
 
 Clone the repository and run the installer:
 
 ```bash
 git clone https://github.com/ja1902/ChangesDetector.git
 cd ChangesDetector
+./install.sh        # Linux
+install.bat         # Windows
 ```
 
-**Linux:**
-```bash
-chmod +x install.sh
-./install.sh
-```
+The installer creates a Python virtual environment, installs PyTorch (with CUDA if a GPU is
+found) and the other dependencies, builds the model weights (Meta's DINOv2 backbone plus
+the trained parts in `weights/`) and links the plugin into your QGIS plugins folder.
 
-**Windows:**
-```
-install.bat
-```
+## Using it in QGIS
 
-The installer will:
-1. Create a Python virtual environment
-2. Install PyTorch (with CUDA if GPU detected, CPU otherwise)
-3. Install all dependencies
-4. Set up the model weights (Meta's DINOv2 backbone + the trained parts in `weights/`)
-5. Link the plugin into your QGIS plugins directory
+1. Open QGIS, enable **ChangeDetection** in **Plugins > Manage and Install Plugins**, then
+   open it from **Plugins > ChangeDetection**.
+2. Choose the **before** and **after** raster layers (georeferenced, e.g. GeoTIFF).
+3. Optional: tick **Process only an area** and click **Draw area on map** to drag a
+   rectangle (or use the map view or a layer's extent). Much faster on large images or
+   without a GPU, and a good way to try the plugin on a small part first.
+4. Choose the mode: **Binary Change Detection** (where something changed) or **Semantic
+   Change Detection** (also what it changed from and into).
+5. Keep the recommended model and settings, or adjust:
+   - **Filter false alarms** (on) and **keep if real ≥** (0.46): lower keeps more changes
+     and more false alarms;
+   - **Fast mode**: about twice as fast on the model step, slightly less accurate;
+   - **Min change area** in m²;
+   - **Device** (Auto, CPU, GPU) and a **GPU memory limit** for small or shared GPUs.
+6. Choose the output GeoPackage and click **Run**. The result is added to the project.
 
-### Usage
+Images are co-registered first (a shift of up to 50 px between the two dates is corrected),
+and imagery coarser than 0.5 m is resampled to 0.5 m and the result written back at the
+original resolution.
 
-1. Open QGIS
-2. Go to **Plugins > Manage and Install Plugins**
-3. Enable **"ChangeDetection"**
-4. Open the plugin from **Plugins > ChangeDetection**
-5. Select your **before** and **after** raster layers
-6. Choose detection mode: **Binary Change Detection** or **Semantic Change Detection**
-7. Select device: **Auto**, **CPU**, or **GPU**
-8. Set processing parameters (tile size, overlap, threshold for binary mode)
-9. Choose an output GeoPackage (semantic mode also saves before/after land-cover rasters next to it)
-10. Click **Run**
+### Output
 
-### Manual Weight Download
+One feature per change, with:
 
-The DINOv2 models are a trained decoder on Meta's frozen DINOv2 ViT-B/14 backbone. The trained parts are in `weights/`; the installer downloads the backbone from Meta and combines them into the model files in the project root. If that download fails, fetch [dinov2_vitb14_pretrain.pth](https://dl.fbaipublicfiles.com/dinov2/dinov2_vitb14/dinov2_vitb14_pretrain.pth) (346 MB, Apache 2.0) into the project root yourself, then run:
+| field | meaning |
+|---|---|
+| `id` | change number |
+| `change` | 1 (binary), or e.g. "farmland -> building" (semantic) |
+| `from_class`, `to_class` | land cover before and after (semantic only) |
+| `confidence` | mean change probability inside the change (0-1) |
+| `filter_score` | the false-alarm filter's probability that the change is real; sort by it to review the borderline ones first |
+| `area` | area in map units² |
+
+A change can have several parts (a MultiPolygon). In semantic mode, changes whose land
+cover is the same on both dates (mostly construction sites) read e.g. "paved / road (class
+unchanged)" and are drawn as "change, type unclear". Semantic mode also saves before and
+after land-cover rasters next to the GeoPackage.
+
+## Models
+
+| Model | Trained on | Mode |
+|---|---|---|
+| **DINOv2 ViT-B finetuned (recommended)** | Changen2 synthetic + LEVIR-CD + custom dataset, false-alarm filter | Binary |
+| DINOv2 ViT-B finetuned, S2Looking (oblique imagery) | as above, with S2Looking in place of LEVIR-CD, its own filter | Binary |
+| DINOv2 ViT-B + synthetic data (general) | Changen2 synthetic + LEVIR-CD (new buildings only) | Binary |
+| **DINOv2 ViT-B + land cover, from -> to (recommended)** | the finetuned model and filter, land cover from OpenEarthMap + SECOND | Semantic |
+
+The S2Looking variant found more changes than the recommended model on some areas of the
+training data and fewer on others; on two areas outside it, it was level on one and slightly
+worse on the other. Try it if the recommended model misses changes on angled imagery. The
+general model finds new buildings only and scores best on public building datasets.
+
+The trained weights are for research / non-commercial use (some training data is
+CC BY-NC-SA 4.0). The DINOv2 backbone is Meta's, Apache 2.0.
+
+### Building the weights by hand
+
+The installer does this. If its download of the backbone fails, fetch
+[dinov2_vitb14_pretrain.pth](https://dl.fbaipublicfiles.com/dinov2/dinov2_vitb14/dinov2_vitb14_pretrain.pth)
+(346 MB) into the project folder and run:
 
 ```bash
 python weights/assemble.py . dinov2_vitb14_pretrain.pth
 ```
 
-This builds:
+This builds `dinov2_vitb14_finetuned.pth`, `dinov2_vitb14_finetuned_s2l.pth`,
+`dinov2_vitb14_c2s1_levir.pth` and copies `landcover_dinov2_vitb14_oem_second.pth`. The
+backbone file can be deleted afterwards.
 
-- `dinov2_vitb14_finetuned.pth` -- DINOv2 finetuned on a custom dataset, the recommended model (binary and labelled)
-- `dinov2_vitb14_finetuned_s2l.pth` -- the same, finetuned alongside S2Looking, for oblique imagery (binary)
-- `dinov2_vitb14_c2s1_levir.pth` -- DINOv2 + synthetic data, the general binary model (also the starting point for `finetune_dinov2.py`)
-- `landcover_dinov2_vitb14_oem_second.pth` -- land-cover head for labelled (from -> to) change
+## Command line
 
-The backbone file can be deleted afterwards. The trained weights are for research / non-commercial use.
-
-### Standalone CLI
+`detect_changes.py` runs the same pipeline as the plugin (use the virtual environment's
+Python, `venv/bin/python`):
 
 ```bash
-# Binary change detection: the finetuned model with its false-alarm filter, tested settings, polygons
+# Binary change: the recommended model with its false-alarm filter and tested settings
 python detect_changes.py --before before.tif --after after.tif --output-gpkg changes.gpkg
 
-# Labelled change: polygons with from_class / to_class / change / area
-python detect_changes.py --before before.tif --after after.tif --mode semantic     --output-gpkg labelled.gpkg --min-area-m2 5
+# Semantic change: from_class / to_class / change on every polygon
+python detect_changes.py --before before.tif --after after.tif --mode semantic --output-gpkg labelled.gpkg
 
 # Only part of the image (coordinates of the before raster)
 python detect_changes.py --before before.tif --after after.tif --extent 500000,4000000,500500,4000500 --output-gpkg area.gpkg
 
-# The alternative for oblique imagery (S2Looking variant, its own filter)
+# The S2Looking variant, or the general model
 python detect_changes.py --before before.tif --after after.tif --preset finetuned_s2l --output-gpkg changes.gpkg
-
-# The previous default (synthetic data, new buildings only), for comparison
-python detect_changes.py --before before.tif --after after.tif     --weights dinov2_vitb14_c2s1_levir.pth --preset synthetic --output-gpkg changes.gpkg
+python detect_changes.py --before before.tif --after after.tif --weights dinov2_vitb14_c2s1_levir.pth --preset synthetic --output-gpkg changes.gpkg
 ```
 
-Options: `--mode binary|semantic`, `--model-type dinov2|ensemble|dinov2_lc`, `--weights path/to/weights.pth`, `--preset finetuned|finetuned_s2l|synthetic|ensemble`, `--no-filter-false-alarms`, `--filter-min-score 0.46`, `--no-filter-orphans`, `--extent XMIN,YMIN,XMAX,YMAX`, `--threshold auto|0.3`, `--target-gsd 0.5`, `--min-area-m2 50` (or `--min-area 20` in pixels), `--histogram-match`, `--tile-size 252`, `--overlap 64`, `--no-coreg`, `--max-shift 50`, `--coreg-window 1024`, `--device auto|cpu|gpu`, `--max-vram 1024`, `--fast`, `--tta-gate 0.5`
+Main options:
 
-### Training
+| option | |
+|---|---|
+| `--extent XMIN,YMIN,XMAX,YMAX` | process only this area |
+| `--filter-min-score 0.46` | "keep if real" for the false-alarm filter |
+| `--no-filter-false-alarms`, `--no-filter-orphans` | turn the filter, or its judging of weaker changes, off |
+| `--min-area-m2 50` | drop smaller changes (`--min-area` in pixels also works) |
+| `--fast` | skip flip averaging |
+| `--device auto\|cpu\|gpu`, `--max-vram MB` | where to run, and a GPU memory limit |
+| `--no-coreg`, `--max-shift 50` | co-registration |
+| `--target-gsd 0.5` | resample coarser imagery to this pixel size (0: off) |
+| `--threshold auto\|0.3` | change threshold (auto: the one each model was tested with) |
 
-`train_dinov2_cd.py` trains DINOv2 decoders on standard change detection datasets (LEVIR-CD format: `train/A/`, `train/B/`, `train/label/`).
+`python detect_changes.py --help` lists the rest (tile size and overlap, scale, styles, and
+older models kept for research).
+
+## Training on your own imagery
+
+`finetune_dinov2.py` finetunes the decoder on your own labelled areas, mixed with a public
+dataset so the model does not forget what it knew; this is how the recommended model was
+made. Label your areas with `benchmarks/make_labels.py` (reviewed candidates become
+`train_label.tif`), then:
 
 ```bash
-# Train on LEVIR-CD
-python train_dinov2_cd.py --data-root /path/to/LEVIR-CD --backbone vitb14 --epochs 50
-
-# Fine-tune on a custom dataset
-python train_dinov2_cd.py --data-root /path/to/custom-dataset \
-    --backbone vitb14 --weights work_dirs/decoder_best.pth --epochs 20 --lr 1e-4
+python finetune_dinov2.py --squares path/to/your_areas --levir path/to/LEVIR-CD --seed 1
 ```
 
-The backbone stays frozen; only the decoder trains (~9M params, ~4GB VRAM).
+The script's header documents the options (S2Looking as partner, hard negatives, seeds,
+weight averaging). `train_dinov2_cd.py` trains a decoder from scratch on a dataset in
+LEVIR-CD format (`train/A/`, `train/B/`, `train/label/`). The backbone stays frozen in
+both; about 4 GB of GPU memory is enough.
 
 ## Troubleshooting
 
-**Plugin doesn't appear in QGIS:**
-- Check that the plugin is enabled in Plugin Manager
-- Verify the symlink/junction exists in your QGIS plugins directory
-- Restart QGIS after installation
+**The plugin doesn't appear in QGIS:** check it is enabled in the Plugin Manager, that the
+link in your QGIS plugins folder exists, and restart QGIS after installing.
 
-**"Model weights not found" error:**
-- Run the installer to set up the weights, or build them manually (see Manual Weight Download)
-- Or use "Use custom weights file" to point to your own checkpoint
+**"Model weights not found":** run the installer, or build the weights by hand (above), or
+tick "Use custom weights file" to point to your own checkpoint.
 
-**"CUDA GPU is not available" error:**
-- Select "CPU" as the device, or install NVIDIA drivers + CUDA toolkit
+**"CUDA GPU is not available":** choose CPU as the device, or install the NVIDIA drivers.
 
-**GPU out of memory:**
-- Close other programs that use the GPU, or use `--device cpu`
-- The DINOv2 models need about 0.4 GB (plus ~0.3 GB for the driver), the Changen2 ensemble about 3.5 GB
-- The batch size follows the free GPU memory and halves if the GPU runs out; a "GPU memory limit" (`--max-vram`) below what the model needs fails with a clear message
+**GPU out of memory:** close other programs that use the GPU. The DINOv2 models need about
+0.4 GB (plus about 0.3 GB for the driver); the batch size follows the free memory, and a
+"GPU memory limit" below what the model needs fails with a clear message.
 
-**Slow inference:**
-- Use GPU if available
-- Increase tile size (256 -> 512) to process fewer tiles
-- Reduce overlap (64 -> 0) for faster but slightly less smooth results
+**Slow:** use a GPU if you have one; otherwise tick **Process only an area** to run on part
+of the image, and **Fast mode** (about 18 instead of 30 minutes per km² on a 24-thread CPU).
+
+**"Process only an area" needs georeferenced rasters:** the area is given in map
+coordinates, so images without georeferencing (e.g. plain JPEGs) can only be processed whole.
