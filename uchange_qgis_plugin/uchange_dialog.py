@@ -27,6 +27,10 @@ from .model_registry import (
 _UNCLEAR = "unclear"
 
 
+class _Stopped(Exception):
+    """The user stopped the run."""
+
+
 class UChangeDialog(QDialog):
     def __init__(self, iface, parent=None):
         super().__init__(parent or iface.mainWindow())
@@ -275,11 +279,18 @@ class UChangeDialog(QDialog):
         btn_layout = QHBoxLayout()
         self.run_btn = QPushButton("Run")
         self.run_btn.clicked.connect(self._on_run)
+        self.stop_btn = QPushButton("Stop")
+        self.stop_btn.setToolTip("Stop the running analysis.")
+        self.stop_btn.setEnabled(False)
+        self.stop_btn.clicked.connect(self._stop_run)
         self.cancel_btn = QPushButton("Close")
         self.cancel_btn.clicked.connect(self.close)
         btn_layout.addStretch()
         btn_layout.addWidget(self.run_btn)
+        btn_layout.addWidget(self.stop_btn)
         btn_layout.addWidget(self.cancel_btn)
+        self._proc = None
+        self._stopped = False
         layout.addLayout(btn_layout)
 
         self._on_model_changed(self.model_selector.currentText())
@@ -360,6 +371,7 @@ class UChangeDialog(QDialog):
         show_rect(self._area_shown, rect)
 
     def closeEvent(self, event):
+        self._stop_run()                       # closing the dialog ends a running analysis
         if self._area_tool is not None:
             self._drawing_done()
         if self._area_shown is not None:
@@ -651,6 +663,9 @@ class UChangeDialog(QDialog):
 
         try:
             self._run_inference_subprocess()
+        except _Stopped:
+            self._log("Stopped.")
+            self.progress.setValue(0)
         except Exception as e:
             self._log(f"ERROR: {e}\n{traceback.format_exc()}")
             if "out of memory" in str(e).lower():
@@ -666,7 +681,25 @@ class UChangeDialog(QDialog):
             else:
                 self.iface.messageBar().pushCritical("ChangeDetection", f"Inference failed: {e}")
         finally:
+            if self._proc is not None and self._proc.poll() is None:
+                self._proc.kill()              # a failed run leaves nothing running
+            self._proc = None
+            self.stop_btn.setEnabled(False)
             self.run_btn.setEnabled(True)
+
+    def _stop_run(self):
+        """End the running analysis (its subprocess); the run loop then reports it."""
+        proc = self._proc
+        if proc is None or proc.poll() is not None:
+            return
+        self._stopped = True
+        self.stop_btn.setEnabled(False)
+        self._log("Stopping...")
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except Exception:
+            proc.kill()
 
     def _run_inference_subprocess(self):
         import subprocess
@@ -749,15 +782,39 @@ class UChangeDialog(QDialog):
                     cmd.append("--no-filter-false-alarms")
 
         self._log("Starting inference subprocess...")
+        import queue
+        import threading
+        # stderr goes to a file: a pipe read only at the end could fill up and hang the run
+        err_file = tempfile.TemporaryFile(mode="w+")
         proc = subprocess.Popen(
-            cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            cmd, stdout=subprocess.PIPE, stderr=err_file,
             text=True, bufsize=1,
         )
+        self._proc, self._stopped = proc, False
+        self.stop_btn.setEnabled(True)
+
+        # stdout is read in a thread so the dialog (and Stop) stays responsive
+        # even while the analysis prints nothing for a while
+        lines = queue.Queue()
+
+        def _reader():
+            for ln in proc.stdout:
+                lines.put(ln)
+            lines.put(None)
+
+        threading.Thread(target=_reader, daemon=True).start()
 
         result_info = None
         error_msg = None
 
-        for line in proc.stdout:
+        while True:
+            try:
+                line = lines.get(timeout=0.05)
+            except queue.Empty:
+                QgsApplication.processEvents()
+                continue
+            if line is None:
+                break
             line = line.strip()
             if not line:
                 continue
@@ -785,9 +842,15 @@ class UChangeDialog(QDialog):
                 result_info = msg
 
         proc.wait()
+        self._proc = None
+        self.stop_btn.setEnabled(False)
+        err_file.seek(0)
+        stderr = err_file.read().strip()
+        err_file.close()
+        if self._stopped:
+            raise _Stopped()
 
         if proc.returncode != 0:
-            stderr = proc.stderr.read().strip()
             if error_msg:
                 raise RuntimeError(error_msg)
             stderr_last = stderr.split("\n")[-1] if stderr else "unknown error"
