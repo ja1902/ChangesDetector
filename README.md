@@ -4,6 +4,23 @@ A research project exploring automated change detection between georeferenced sa
 
 ## What changed (v0.10)
 
+### Process only an area, one feature per change (v0.10.1)
+
+- **Process only an area**: the dialog has a "Process only an area" box (the current map
+  view, a layer's extent, or a rectangle drawn on the map); CLI `--extent XMIN,YMIN,XMAX,YMAX`
+  in the before raster's coordinates. Both rasters are cut to that area before anything
+  else runs. On a test pair, a 500 m area found every change a whole-image run found there
+  (and one more); outlines can differ slightly because the tiles fall in different places.
+- **One feature per change**: redrawing a kept change at the filter's stricter outline could
+  split it into pieces (on one test pair 22 changes came out as 42 polygons, one site in 13).
+  Each change is now a single feature (a MultiPolygon when it has several parts), in binary
+  and labelled mode, and `--min-area` applies to the whole change. Pixels and scores are
+  unchanged.
+- **Without a GPU**: a km² takes about half an hour on a 24-thread CPU (about 18 minutes with
+  Fast mode, under a minute on a GPU). The dialog and the CLI now say how long to expect for
+  the area chosen. The false-alarm filter judges four changes per pass: same scores, about a
+  fifth faster.
+
 ### The filter also judges weaker changes
 
 Small changes often never reach the model's 0.6 level, so the filter never saw them.
@@ -420,6 +437,9 @@ python detect_changes.py --before before.tif --after after.tif --output-gpkg cha
 # Labelled change: polygons with from_class / to_class / change / area
 python detect_changes.py --before before.tif --after after.tif --mode semantic     --output-gpkg labelled.gpkg --min-area 20
 
+# Only part of the image (coordinates of the before raster)
+python detect_changes.py --before before.tif --after after.tif --extent 500000,4000000,500500,4000500 --output-gpkg area.gpkg
+
 # The alternative for oblique imagery (S2Looking variant, its own filter)
 python detect_changes.py --before before.tif --after after.tif --preset finetuned_s2l --output-gpkg changes.gpkg
 
@@ -427,7 +447,7 @@ python detect_changes.py --before before.tif --after after.tif --preset finetune
 python detect_changes.py --before before.tif --after after.tif     --weights dinov2_vitb14_c2s1_levir.pth --preset synthetic --output-gpkg changes.gpkg
 ```
 
-Options: `--mode binary|semantic`, `--model-type dinov2|ensemble|dinov2_lc`, `--weights path/to/weights.pth`, `--preset finetuned|finetuned_s2l|synthetic|ensemble`, `--no-filter-false-alarms`, `--filter-min-score 0.46`, `--no-filter-orphans`, `--threshold auto|0.3`, `--target-gsd 0.5`, `--min-area 20`, `--histogram-match`, `--tile-size 252`, `--overlap 64`, `--no-coreg`, `--max-shift 50`, `--coreg-window 1024`, `--device auto|cpu|gpu`, `--max-vram 1024`, `--fast`, `--tta-gate 0.5`
+Options: `--mode binary|semantic`, `--model-type dinov2|ensemble|dinov2_lc`, `--weights path/to/weights.pth`, `--preset finetuned|finetuned_s2l|synthetic|ensemble`, `--no-filter-false-alarms`, `--filter-min-score 0.46`, `--no-filter-orphans`, `--extent XMIN,YMIN,XMAX,YMAX`, `--threshold auto|0.3`, `--target-gsd 0.5`, `--min-area 20`, `--histogram-match`, `--tile-size 252`, `--overlap 64`, `--no-coreg`, `--max-shift 50`, `--coreg-window 1024`, `--device auto|cpu|gpu`, `--max-vram 1024`, `--fast`, `--tta-gate 0.5`
 
 ### Training
 

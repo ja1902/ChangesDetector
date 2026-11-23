@@ -228,6 +228,9 @@ def build_parser():
                         help="Skip co-registration of input images")
     parser.add_argument("--max-shift", type=int, default=50,
                         help="Max co-registration shift in pixels (default: 50)")
+    parser.add_argument("--extent", default=None, metavar="XMIN,YMIN,XMAX,YMAX",
+                        help="Process only this area, in the before raster's coordinates "
+                             "(the after raster is cut to the same area)")
     parser.add_argument("--coreg-window", type=int, default=1024,
                         help="Co-registration matching window size (default: 1024)")
     parser.add_argument("--json-progress", action="store_true",
@@ -480,6 +483,24 @@ def main():
         _log(cs_summary)
     _progress(20)
 
+    if args.extent:
+        import atexit
+        import shutil
+        import tempfile
+        from uchange_qgis_plugin.raster_io import crop_to_extent
+        try:
+            ext = [float(v) for v in args.extent.split(",")]
+            if len(ext) != 4:
+                raise ValueError("--extent needs four numbers: XMIN,YMIN,XMAX,YMAX")
+            area_dir = tempfile.mkdtemp(prefix="uchange_area_")
+            atexit.register(shutil.rmtree, area_dir, True)
+            args.before, args.after, used, units = crop_to_extent(args.before, args.after, ext, area_dir)
+        except Exception as e:
+            _emit({"type": "error", "message": f"Area to process: {e}"})
+            sys.exit(1)
+        _log(f"Area to process: {used[0]:.1f}, {used[1]:.1f} - {used[2]:.1f}, {used[3]:.1f} "
+             f"({used[2] - used[0]:.0f} x {used[3] - used[1]:.0f} {units})")
+
     _log(f"Reading before: {args.before}")
     before_img, before_geo = read_image(args.before)
     _progress(5)
@@ -539,6 +560,13 @@ def main():
                                                args.scale, before_img.shape)
         if gsd:
             _log(f"Pixel size: {gsd:.2f} m")
+            km2 = w * h * gsd * gsd / 1e6
+            if device.type == "cpu" and km2 >= 0.1:
+                # measured on a 24-thread CPU: ~30 min per km2, ~18 with --fast
+                _log(f"Running on the CPU: expect roughly {30 * km2:.0f} minutes for {km2:.2f} km2"
+                     + ("" if not args.tta else f" (about {18 * km2:.0f} with --fast)")
+                     + "; a GPU needs under a minute per km2."
+                     + ("" if args.extent else " Try a small area first (--extent)."))
         if gsd_note:
             _log(f"  {gsd_note}")
         if abs(factor - 1.0) > 1e-6:

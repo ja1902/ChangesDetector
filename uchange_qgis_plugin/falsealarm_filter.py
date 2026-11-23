@@ -35,6 +35,7 @@ from PIL import Image
 MIN_BLOB_M2 = 50.0        # smaller blobs were never judged (nor scored)
 CONTEXT_M, MIN_HALF_M = 15.0, 20.0
 RING_M = 8.0
+BATCH = 4          # blobs per DINOv2 pass in the filter (32 crops)
 ORPHAN_SMOOTH_M, ORPHAN_SEP_M, ORPHAN_R_M = 1.0, 5.0, 15.0
 _ROWS = 2048              # orphan search works on strips of this many rows
 
@@ -80,9 +81,8 @@ class _Features:
         t = np.asarray(Image.fromarray(np.ascontiguousarray(im[..., :3])).resize((self.size, self.size), Image.LANCZOS))
         return np.transpose((t.astype(np.float32) / 255 - _MEAN) / _STD, (2, 0, 1))
 
-    @torch.no_grad()
-    def blob(self, A, B, ys, xs, gsd):
-        """(L, 2 in/ring, 2 dates, 768) for one blob, averaged over 4 rotations."""
+    def _inputs(self, A, B, ys, xs, gsd):
+        """Crops (2, 3, S, S) and inside / ring weights on the token grid for one blob."""
         from scipy import ndimage as ndi
         y0, y1, x0, x1 = ys.min(), ys.max() + 1, xs.min(), xs.max() + 1
         cy, cx = (y0 + y1) // 2, (x0 + x1) // 2
@@ -93,23 +93,43 @@ class _Features:
         mask[my[ok], mx[ok]] = True
         g = self.size // 14
         ring = ndi.binary_dilation(mask, iterations=max(2, int(mask.shape[0] * RING_M / 60 / 2))) & ~mask
-        w_in = torch.tensor(np.array(Image.fromarray(mask.astype(np.float32)).resize((g, g), Image.BOX)), device=self.dev)
-        w_ring = torch.tensor(np.array(Image.fromarray(ring.astype(np.float32)).resize((g, g), Image.BOX)), device=self.dev)
+        w_in = np.array(Image.fromarray(mask.astype(np.float32)).resize((g, g), Image.BOX))
+        w_ring = np.array(Image.fromarray(ring.astype(np.float32)).resize((g, g), Image.BOX))
         win = (cy - h, cy + h, cx - h, cx + h)
-        x = torch.tensor(np.stack([self._prep(_crop(A, *win)), self._prep(_crop(B, *win))]), device=self.dev)
-        batch = torch.cat([torch.rot90(x, k, (2, 3)) for k in range(4)]).to(self.dtype)  # (8,3,S,S)
-        with torch.autocast("cuda", dtype=torch.float16, enabled=self.dev.type == "cuda"):
-            feats = self._tokens(batch)
-        res = []
-        for f in feats:                                   # (8, g, g, C)
-            acc = 0
-            for k in range(4):
-                fk = torch.rot90(f[2 * k:2 * k + 2].float(), -k, (1, 2))
-                fi = (fk * w_in[None, ..., None]).sum((1, 2)) / (w_in.sum() + 1e-6)
-                fr = (fk * w_ring[None, ..., None]).sum((1, 2)) / (w_ring.sum() + 1e-6)
-                acc = acc + torch.stack([fi, fr])
-            res.append(acc / 4)
-        return torch.stack(res).cpu().numpy()
+        x = np.stack([self._prep(_crop(A, *win)), self._prep(_crop(B, *win))])
+        return x, w_in, w_ring
+
+    @torch.no_grad()
+    def blobs(self, A, B, pixels, gsd):
+        """[(L, 2 in/ring, 2 dates, 768)] for the blobs given as (ys, xs), averaged over 4
+        rotations; BATCH blobs go through DINOv2 together (same result as one at a time)."""
+        out = []
+        for b0 in range(0, len(pixels), BATCH):
+            inp = [self._inputs(A, B, ys, xs, gsd) for ys, xs in pixels[b0:b0 + BATCH]]
+            x = torch.tensor(np.stack([i[0] for i in inp]), device=self.dev)       # (k, 2, 3, S, S)
+            k, S = x.shape[0], x.shape[-1]
+            rot = torch.stack([torch.rot90(x, r, (3, 4)) for r in range(4)], 1)      # (k, 4, 2, 3, S, S)
+            batch = rot.reshape(k * 8, 3, S, S).to(self.dtype)
+            with torch.autocast("cuda", dtype=torch.float16, enabled=self.dev.type == "cuda"):
+                feats = self._tokens(batch)
+            for j, (_, w_in, w_ring) in enumerate(inp):
+                w_in = torch.tensor(w_in, device=self.dev)
+                w_ring = torch.tensor(w_ring, device=self.dev)
+                res = []
+                for f in feats:                                   # (k*8, g, g, C)
+                    acc = 0
+                    for r in range(4):
+                        fk = torch.rot90(f[j * 8 + 2 * r:j * 8 + 2 * r + 2].float(), -r, (1, 2))
+                        fi = (fk * w_in[None, ..., None]).sum((1, 2)) / (w_in.sum() + 1e-6)
+                        fr = (fk * w_ring[None, ..., None]).sum((1, 2)) / (w_ring.sum() + 1e-6)
+                        acc = acc + torch.stack([fi, fr])
+                    res.append(acc / 4)
+                out.append(torch.stack(res).cpu().numpy())
+        return out
+
+    def blob(self, A, B, ys, xs, gsd):
+        """(L, 2 in/ring, 2 dates, 768) for one blob, averaged over 4 rotations."""
+        return self.blobs(A, B, [(ys, xs)], gsd)[0]
 
 
 def _l2n(v):
@@ -232,15 +252,17 @@ def filter_mask(prob, before, after, backbone, gsd, flt, device, low=0.6, redraw
     units = [(comp, slices[i - 1], i) for i in ids] + [(olab, sl, j) for j, sl in enumerate(oslices, 1)]
     fx = _Features(backbone, device, flt["size"], flt["layers"])
     feats, p90 = [], []
-    for j, (lab, sl, i) in enumerate(units):
+    for b0 in range(0, len(units), BATCH):
         if cancel_fn and cancel_fn():
             return None, None
-        ys, xs = np.nonzero(lab[sl] == i)
-        ys, xs = ys + sl[0].start, xs + sl[1].start
-        feats.append(fx.blob(before, after, ys, xs, gsd))
-        p90.append(np.percentile(prob[ys, xs], 90))
+        pix = []
+        for lab, sl, i in units[b0:b0 + BATCH]:
+            ys, xs = np.nonzero(lab[sl] == i)
+            pix.append((ys + sl[0].start, xs + sl[1].start))
+            p90.append(np.percentile(prob[pix[-1][0], pix[-1][1]], 90))
+        feats += fx.blobs(before, after, pix, gsd)
         if progress_fn:
-            progress_fn(j + 1, len(units))
+            progress_fn(min(b0 + BATCH, len(units)), len(units))
     out = np.zeros(prob.shape, np.uint8)
     real_prob = np.full(n + m, np.nan, np.float32)
     stats = {"blobs": len(ids), "kept": 0, "orphans": m, "orphans_kept": 0, "labels": comp,

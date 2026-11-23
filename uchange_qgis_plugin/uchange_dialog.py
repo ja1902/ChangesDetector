@@ -11,10 +11,10 @@ from qgis.PyQt.QtCore import Qt
 from qgis.core import (
     QgsApplication, QgsMapLayerProxyModel, QgsProject, QgsVectorLayer,
     QgsSimpleFillSymbolLayer, QgsSymbol, QgsSingleSymbolRenderer,
-    QgsCategorizedSymbolRenderer, QgsRendererCategory,
+    QgsCategorizedSymbolRenderer, QgsRendererCategory, QgsUnitTypes,
 )
 from qgis.PyQt.QtGui import QColor
-from qgis.gui import QgsMapLayerComboBox
+from qgis.gui import QgsExtentGroupBox, QgsMapLayerComboBox
 
 from .model_registry import (
     MODEL_REGISTRY, PRESETS, is_scd_model, is_labelled_model, resolve_weights_path,
@@ -51,6 +51,21 @@ class UChangeDialog(QDialog):
 
         input_group.setLayout(input_form)
         layout.addWidget(input_group)
+
+        # --- Area to process (off: the whole image) ---
+        self.extent_box = QgsExtentGroupBox()
+        self.extent_box.setTitle("Process only an area")
+        self.extent_box.setCheckable(True)
+        self.extent_box.setChecked(False)
+        self.extent_box.setToolTip(
+            "Run on part of the image only: the current map view, a layer's extent,\n"
+            "or a rectangle drawn on the map. Much faster on large images or without\n"
+            "a GPU. Outlines can differ slightly from a run on the whole image.")
+        if self.iface is not None and self.iface.mapCanvas() is not None:
+            self.extent_box.setMapCanvas(self.iface.mapCanvas())
+        layout.addWidget(self.extent_box)
+        self.before_layer.layerChanged.connect(self._on_before_layer_changed)
+        self._on_before_layer_changed(self.before_layer.currentLayer())
 
         # --- Model group ---
         model_group = QGroupBox("Model")
@@ -255,6 +270,38 @@ class UChangeDialog(QDialog):
         layout.addLayout(btn_layout)
 
         self._on_model_changed(self.model_selector.currentText())
+
+    def _on_before_layer_changed(self, layer):
+        """The area is given in the before raster's coordinates; its extent is the default."""
+        if layer is None:
+            return
+        crs = layer.crs()
+        was_on = self.extent_box.isChecked()   # setting an extent ticks the box; keep the user's choice
+        self.extent_box.setOutputCrs(crs)
+        self.extent_box.setOriginalExtent(layer.extent(), crs)
+        self.extent_box.setCurrentExtent(layer.extent(), crs)
+        if not was_on:                         # keep an area the user already chose
+            self.extent_box.setOutputExtentFromOriginal()
+        self.extent_box.setChecked(was_on)
+
+    def _area_arg(self):
+        """--extent value for the chosen area, or None for the whole image."""
+        if not self.extent_box.isChecked():
+            return None
+        r = self.extent_box.outputExtent()
+        if r.isEmpty():
+            return None
+        return f"{r.xMinimum()!r},{r.yMinimum()!r},{r.xMaximum()!r},{r.yMaximum()!r}"
+
+    def _area_km2(self):
+        """Size of what will be processed in km2 (chosen area or the before raster), or None."""
+        layer = self.before_layer.currentLayer()
+        if layer is None or layer.crs().isGeographic():
+            return None
+        r = self.extent_box.outputExtent() if self.extent_box.isChecked() else layer.extent()
+        r = r.intersect(layer.extent())
+        to_m = QgsUnitTypes.fromUnitToUnitFactor(layer.crs().mapUnits(), QgsUnitTypes.DistanceMeters)
+        return r.width() * r.height() * to_m * to_m / 1e6 if not r.isEmpty() else None
 
     def _is_scd_mode(self):
         return self.mode_selector.currentIndex() == 1
@@ -463,11 +510,16 @@ class UChangeDialog(QDialog):
 
         device_text = self.device_selector.currentText()
         if device_text == "CPU":
+            km2 = self._area_km2()
+            size = (f"For this area ({km2:.2f} km\u00b2) expect roughly {max(1, round(30 * km2))} minutes"
+                    f"{'' if not self._uses_preset() else f', or about {max(1, round(18 * km2))} with Fast mode'}"
+                    ".\n" if km2 else "")
             reply = QMessageBox.question(
-                self, "Performance Warning",
-                "CPU inference may be slow.\n"
-                "Consider using a GPU if available.\n\n"
-                "Continue anyway?",
+                self, "Running on the CPU",
+                "On a CPU this takes about half an hour per km\u00b2 (measured on a 24-thread\n"
+                "processor); a GPU needs under a minute.\n" + size +
+                "\"Process only an area\" lets you try a small part first.\n\n"
+                "Continue?",
                 QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
             )
             if reply != QMessageBox.Yes:
@@ -537,6 +589,9 @@ class UChangeDialog(QDialog):
         ]
         if self.max_vram.value() and device != "cpu":
             cmd.extend(["--max-vram", str(self.max_vram.value())])
+        area = self._area_arg()
+        if area:
+            cmd.extend(["--extent", area])
 
         if scd_mode and not self._is_labelled():
             cmd.extend(["--mode", "semantic"])

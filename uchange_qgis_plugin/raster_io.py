@@ -88,6 +88,54 @@ def read_raster(source_path):
     return image, geotransform, projection_wkt
 
 
+def _raster_bounds(ds):
+    gt = ds.GetGeoTransform()
+    xs = (gt[0], gt[0] + gt[1] * ds.RasterXSize)
+    ys = (gt[3], gt[3] + gt[5] * ds.RasterYSize)
+    return min(xs), min(ys), max(xs), max(ys)
+
+
+def crop_to_extent(before_path, after_path, extent, out_dir):
+    """Cut both rasters to an area: extent (xmin, ymin, xmax, ymax) in the before raster's CRS.
+
+    The after raster is cut to the same area in its own CRS. Each crop keeps the source
+    pixel grid (no resampling) and goes to out_dir as GeoTIFF.
+    Returns (before crop path, after crop path, extent actually used, before CRS units).
+    Raises ValueError if the area misses the before raster or is too small.
+    """
+    import os
+    xmin, ymin, xmax, ymax = (float(v) for v in extent)
+    if not (xmax > xmin and ymax > ymin):
+        raise ValueError("the area is empty (xmax must exceed xmin and ymax ymin)")
+    b = gdal.Open(before_path)
+    bx0, by0, bx1, by1 = _raster_bounds(b)
+    xmin, ymin, xmax, ymax = max(xmin, bx0), max(ymin, by0), min(xmax, bx1), min(ymax, by1)
+    px = abs(b.GetGeoTransform()[1])
+    if xmax - xmin < 32 * px or ymax - ymin < 32 * px:
+        raise ValueError("the area is outside the before raster, or under 32 pixels across")
+    srs_b = osr.SpatialReference()
+    srs_b.ImportFromWkt(b.GetProjection())
+    units = srs_b.GetLinearUnitsName() if srs_b.IsProjected() else "degree"
+    a = gdal.Open(after_path)
+    win_a = (xmin, ymin, xmax, ymax)
+    srs_a = osr.SpatialReference()
+    srs_a.ImportFromWkt(a.GetProjection())
+    if b.GetProjection() and a.GetProjection() and not srs_a.IsSame(srs_b):
+        for s in (srs_a, srs_b):
+            s.SetAxisMappingStrategy(osr.OAMS_TRADITIONAL_GIS_ORDER)
+        ct = osr.CoordinateTransformation(srs_b, srs_a)
+        corners = [ct.TransformPoint(x, y)[:2] for x in (xmin, xmax) for y in (ymin, ymax)]
+        win_a = (min(c[0] for c in corners), min(c[1] for c in corners),
+                 max(c[0] for c in corners), max(c[1] for c in corners))
+    out = []
+    for name, ds, (x0, y0, x1, y1) in (("before", b, (xmin, ymin, xmax, ymax)), ("after", a, win_a)):
+        path = os.path.join(out_dir, f"{name}_area.tif")
+        gdal.Translate(path, ds, projWin=[x0, y1, x1, y0], format="GTiff",
+                       creationOptions=["TILED=YES", "COMPRESS=DEFLATE"])
+        out.append(path)
+    return out[0], out[1], (xmin, ymin, xmax, ymax), units
+
+
 def _smooth_mask(binary_mask, kernel_size=5):
     """Morphological close then open to smooth jagged mask edges."""
     import cv2
