@@ -27,6 +27,42 @@ from .model_registry import (
 _UNCLEAR = "unclear"
 
 
+def _outline(geometry_type, color, width=0.5, dashed=False):
+    """A see-through fill with a coloured outline."""
+    symbol = QgsSymbol.defaultSymbol(geometry_type)
+    fill = QgsSimpleFillSymbolLayer()
+    fill.setColor(QColor(0, 0, 0, 0))
+    fill.setStrokeColor(color)
+    fill.setStrokeWidth(width)
+    if dashed:
+        fill.setStrokeStyle(Qt.DashLine)
+    symbol.changeSymbolLayer(0, fill)
+    return symbol
+
+
+# filter_score classes: (lower, upper, label, colour, width, dashed)
+_SCORE_CLASSES = [
+    (0.70, 1.00, "likely real (0.70 and up)", QColor(227, 26, 28), 0.7, False),
+    (0.50, 0.70, "probably real (0.50 - 0.70)", QColor(255, 127, 0), 0.6, False),
+    (0.00, 0.50, "borderline (under 0.50)", QColor(255, 255, 51), 0.5, True),
+]
+
+
+def _style_changes(layer):
+    """Outline changes by the false-alarm filter's score (red, orange, dashed yellow);
+    a plain yellow outline when there is no score (filter off)."""
+    from qgis.core import QgsGraduatedSymbolRenderer, QgsRendererRange
+    gt = layer.geometryType()
+    idx = layer.fields().indexOf("filter_score")
+    scored = idx >= 0 and any(f[idx] is not None and f[idx] == f[idx] for f in layer.getFeatures())
+    if not scored:
+        layer.setRenderer(QgsSingleSymbolRenderer(_outline(gt, QColor(255, 255, 0))))
+        return
+    ranges = [QgsRendererRange(lo, hi, _outline(gt, c, w, d), label)
+              for lo, hi, label, c, w, d in _SCORE_CLASSES]          # legend: most sure first
+    layer.setRenderer(QgsGraduatedSymbolRenderer("filter_score", ranges))
+
+
 class _Stopped(Exception):
     """The user stopped the run."""
 
@@ -898,13 +934,7 @@ class UChangeDialog(QDialog):
             if self.add_to_project.isChecked():
                 layer = QgsVectorLayer(gpkg_path, "Change Detection", "ogr")
                 if layer.isValid():
-                    symbol = QgsSymbol.defaultSymbol(layer.geometryType())
-                    fill = QgsSimpleFillSymbolLayer()
-                    fill.setColor(QColor(0, 0, 0, 0))
-                    fill.setStrokeColor(QColor(255, 255, 0))
-                    fill.setStrokeWidth(0.5)
-                    symbol.changeSymbolLayer(0, fill)
-                    layer.setRenderer(QgsSingleSymbolRenderer(symbol))
+                    _style_changes(layer)
                     QgsProject.instance().addMapLayer(layer)
                     self._log("Layer added to project.")
         else:
