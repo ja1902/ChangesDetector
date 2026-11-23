@@ -223,7 +223,8 @@ def build_parser():
     parser.add_argument("--grayscale", action="store_true",
                         help="Convert inputs to grayscale (for grayscale-trained models)")
     parser.add_argument("--histogram-match", action="store_true",
-                        help="Match after image histogram to before image (fixes radiometric mismatch)")
+                        help="Match each after tile's colours to the before tile. Not recommended: with the "
+                             "current models it finds fewer changes (EXPERIMENTS.md)")
     parser.add_argument("--no-coreg", action="store_true",
                         help="Skip co-registration of input images")
     parser.add_argument("--max-shift", type=int, default=50,

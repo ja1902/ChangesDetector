@@ -146,13 +146,6 @@ class UChangeDialog(QDialog):
         self.coregister_check.setChecked(True)
         proc_form.addRow("", self.coregister_check)
 
-        self.histogram_match_check = QCheckBox("Match image histograms")
-        self.histogram_match_check.setChecked(False)
-        self.histogram_match_check.setToolTip(
-            "Normalize the 'after' image colors to match the 'before' image.\n"
-            "Helps when images have different brightness or color balance."
-        )
-        proc_form.addRow("", self.histogram_match_check)
 
         self.fast_mode_check = QCheckBox("Fast mode")
         self.fast_mode_check.setChecked(False)
@@ -733,8 +726,6 @@ class UChangeDialog(QDialog):
         if not self.coregister_check.isChecked():
             cmd.append("--no-coreg")
 
-        if self.histogram_match_check.isChecked():
-            cmd.append("--histogram-match")
 
         model_name = self.model_selector.currentText()
         model_entry = self._model_registry.get(model_name, {})

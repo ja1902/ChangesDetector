@@ -225,10 +225,11 @@ CNN-based models like ChangerEx are **domain-locked** -- they achieve high F1 on
 
 ### Histogram matching
 
-- Optional **per-tile histogram matching** to handle radiometric mismatch between image dates
-- Normalizes each tile of the "after" image to match the "before" image's color distribution
-- Helps when images have different brightness, contrast, or color balance due to different capture conditions
-- Available via "Match image histograms" checkbox in QGIS and `--histogram-match` on the CLI
+- Optional **per-tile histogram matching** (`--histogram-match`): each "after" tile's colours are
+  matched to the "before" tile
+- **Not recommended with the current models** and no longer in the dialog (v0.10.1): on the 13
+  areas of the training data it found fewer changes (-2.7 points with the false-alarm filter,
+  -7.3 without), small ones included, because matching a tile partly erases the change in it
 
 ### Plugin UX improvements
 
