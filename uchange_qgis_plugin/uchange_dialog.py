@@ -64,6 +64,7 @@ class UChangeDialog(QDialog):
             "a GPU. Outlines can differ slightly from a run on the whole image.")
         self._canvas = self.iface.mapCanvas() if self.iface is not None else None
         self._area_tool = self._prev_tool = self._area_shown = None
+        self._drawn = False          # outline only an area drawn on the map, never the default
         if self._canvas is not None:
             # our own drawing tool (orange) replaces the built-in one
             self.extent_box.setMapCanvas(self._canvas, False)
@@ -77,7 +78,7 @@ class UChangeDialog(QDialog):
                 box_layout.addWidget(self.draw_area_btn)
             else:
                 layout.addWidget(self.draw_area_btn)
-            self.extent_box.extentChanged.connect(lambda _r: self._show_area())
+            self.extent_box.extentChanged.connect(self._on_extent_changed)
             self.extent_box.toggled.connect(lambda _on: self._show_area())
         layout.addWidget(self.extent_box)
         self.before_layer.layerChanged.connect(self._on_before_layer_changed)
@@ -293,15 +294,28 @@ class UChangeDialog(QDialog):
             return
         crs = layer.crs()
         was_on = self.extent_box.isChecked()   # setting an extent ticks the box; keep the user's choice
-        self.extent_box.setOutputCrs(crs)
-        self.extent_box.setOriginalExtent(layer.extent(), crs)
-        self.extent_box.setCurrentExtent(layer.extent(), crs)
-        if not was_on:                         # keep an area the user already chose
-            self.extent_box.setOutputExtentFromOriginal()
-        self.extent_box.setChecked(was_on)
+        self._setting_drawn = was_on and self._drawn   # a kept drawn area stays outlined
+        try:
+            self.extent_box.setOutputCrs(crs)
+            self.extent_box.setOriginalExtent(layer.extent(), crs)
+            self.extent_box.setCurrentExtent(layer.extent(), crs)
+            if not was_on:                     # keep an area the user already chose
+                self.extent_box.setOutputExtentFromOriginal()
+            self.extent_box.setChecked(was_on)
+        finally:
+            self._setting_drawn = False
+
+    def _on_extent_changed(self, _rect):
+        """Any extent not just drawn (layer, map view, typed) is not outlined."""
+        if not self._setting_drawn:
+            self._drawn = False
+        self._show_area()
+
+    _setting_drawn = False
 
     def _start_drawing(self):
-        from .area_tool import AreaTool
+        from .area_tool import AreaTool, show_rect
+        show_rect(self._area_shown, None)      # only the new rectangle while dragging
         self._prev_tool = self._canvas.mapTool()
         self._area_tool = AreaTool(self._canvas)
         self._area_tool.finished.connect(self._area_drawn)
@@ -312,8 +326,13 @@ class UChangeDialog(QDialog):
             "ChangeDetection", "Drag a rectangle on the map for the area to process (Esc cancels).")
 
     def _area_drawn(self, rect):
-        self.extent_box.setOutputExtentFromUser(rect, self._canvas.mapSettings().destinationCrs())
-        self.extent_box.setChecked(True)
+        self._setting_drawn = True
+        try:
+            self.extent_box.setOutputExtentFromUser(rect, self._canvas.mapSettings().destinationCrs())
+            self.extent_box.setChecked(True)
+        finally:
+            self._setting_drawn = False
+        self._drawn = True
         self._drawing_done()
 
     def _drawing_done(self):
@@ -335,7 +354,7 @@ class UChangeDialog(QDialog):
             return
         from .area_tool import show_rect
         rect = None
-        if self.extent_box.isChecked() and not self.extent_box.outputExtent().isEmpty():
+        if self._drawn and self.extent_box.isChecked() and not self.extent_box.outputExtent().isEmpty():
             ct = QgsCoordinateTransform(self.extent_box.outputCrs(),
                                         self._canvas.mapSettings().destinationCrs(), QgsProject.instance())
             try:
