@@ -24,5 +24,7 @@ class UChangePlugin:
 
     def run(self):
         from .uchange_dialog import UChangeDialog
+        if getattr(self, "dialog", None) is not None:
+            self.dialog.close()                # removes its area outline from the map
         self.dialog = UChangeDialog(self.iface)
         self.dialog.show()

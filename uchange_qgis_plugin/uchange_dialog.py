@@ -12,6 +12,7 @@ from qgis.core import (
     QgsApplication, QgsMapLayerProxyModel, QgsProject, QgsVectorLayer,
     QgsSimpleFillSymbolLayer, QgsSymbol, QgsSingleSymbolRenderer,
     QgsCategorizedSymbolRenderer, QgsRendererCategory, QgsUnitTypes,
+    QgsCoordinateTransform,
 )
 from qgis.PyQt.QtGui import QColor
 from qgis.gui import QgsExtentGroupBox, QgsMapLayerComboBox
@@ -61,8 +62,23 @@ class UChangeDialog(QDialog):
             "Run on part of the image only: the current map view, a layer's extent,\n"
             "or a rectangle drawn on the map. Much faster on large images or without\n"
             "a GPU. Outlines can differ slightly from a run on the whole image.")
-        if self.iface is not None and self.iface.mapCanvas() is not None:
-            self.extent_box.setMapCanvas(self.iface.mapCanvas())
+        self._canvas = self.iface.mapCanvas() if self.iface is not None else None
+        self._area_tool = self._prev_tool = self._area_shown = None
+        if self._canvas is not None:
+            # our own drawing tool (orange) replaces the built-in one
+            self.extent_box.setMapCanvas(self._canvas, False)
+            from .area_tool import area_band
+            self._area_shown = area_band(self._canvas)
+            self.draw_area_btn = QPushButton("Draw area on map")
+            self.draw_area_btn.setToolTip("Drag a rectangle on the map (Esc or right click cancels).")
+            self.draw_area_btn.clicked.connect(self._start_drawing)
+            box_layout = self.extent_box.layout()
+            if box_layout is not None:
+                box_layout.addWidget(self.draw_area_btn)
+            else:
+                layout.addWidget(self.draw_area_btn)
+            self.extent_box.extentChanged.connect(lambda _r: self._show_area())
+            self.extent_box.toggled.connect(lambda _on: self._show_area())
         layout.addWidget(self.extent_box)
         self.before_layer.layerChanged.connect(self._on_before_layer_changed)
         self._on_before_layer_changed(self.before_layer.currentLayer())
@@ -284,6 +300,78 @@ class UChangeDialog(QDialog):
             self.extent_box.setOutputExtentFromOriginal()
         self.extent_box.setChecked(was_on)
 
+    def _start_drawing(self):
+        from .area_tool import AreaTool
+        self._prev_tool = self._canvas.mapTool()
+        self._area_tool = AreaTool(self._canvas)
+        self._area_tool.finished.connect(self._area_drawn)
+        self._area_tool.cancelled.connect(self._drawing_done)
+        self._canvas.setMapTool(self._area_tool)
+        self.hide()
+        self.iface.messageBar().pushInfo(
+            "ChangeDetection", "Drag a rectangle on the map for the area to process (Esc cancels).")
+
+    def _area_drawn(self, rect):
+        self.extent_box.setOutputExtentFromUser(rect, self._canvas.mapSettings().destinationCrs())
+        self.extent_box.setChecked(True)
+        self._drawing_done()
+
+    def _drawing_done(self):
+        tool, self._area_tool = self._area_tool, None
+        if tool is not None:
+            self._canvas.unsetMapTool(tool)
+            tool.remove()
+        if self._prev_tool is not None:
+            self._canvas.setMapTool(self._prev_tool)
+        self.iface.messageBar().clearWidgets()
+        self.show()
+        self.raise_()
+        self.activateWindow()
+        self._show_area()
+
+    def _show_area(self):
+        """Outline the chosen area on the map (orange) while the box is ticked."""
+        if self._area_shown is None:
+            return
+        from .area_tool import show_rect
+        rect = None
+        if self.extent_box.isChecked() and not self.extent_box.outputExtent().isEmpty():
+            ct = QgsCoordinateTransform(self.extent_box.outputCrs(),
+                                        self._canvas.mapSettings().destinationCrs(), QgsProject.instance())
+            try:
+                rect = ct.transformBoundingBox(self.extent_box.outputExtent())
+            except Exception:
+                rect = None
+        show_rect(self._area_shown, rect)
+
+    def closeEvent(self, event):
+        if self._area_tool is not None:
+            self._drawing_done()
+        if self._area_shown is not None:
+            self._canvas.scene().removeItem(self._area_shown)
+            self._area_shown = None
+        super().closeEvent(event)
+
+    def _area_problem(self):
+        """Why the chosen area can't be processed, or None."""
+        if not self.extent_box.isChecked():
+            return None
+        layer = self.before_layer.currentLayer()
+        try:
+            from osgeo import gdal
+            ds = gdal.Open(layer.source())
+            georef = ds is not None and ds.GetGeoTransform(can_return_null=True) is not None
+        except Exception:
+            georef = True                      # can't tell: let the run report it
+        if not georef or not layer.crs().isValid():
+            return ("\"Process only an area\" needs georeferenced rasters (such as GeoTIFFs with a\n"
+                    "coordinate system); the before raster has no georeferencing.\n"
+                    "Untick the box to process the whole image.")
+        r = self.extent_box.outputExtent()
+        if r.isEmpty() or not r.intersects(layer.extent()):
+            return "The area to process does not overlap the before raster."
+        return None
+
     def _area_arg(self):
         """--extent value for the chosen area, or None for the whole image."""
         if not self.extent_box.isChecked():
@@ -439,6 +527,10 @@ class UChangeDialog(QDialog):
             label = "output GeoTIFF path" if self._raster_output() else "output GeoPackage path"
             QMessageBox.warning(self, "Error", f"Specify an {label}.")
             return False
+        problem = self._area_problem()
+        if problem:
+            QMessageBox.warning(self, "Area to process", problem)
+            return False
         return True
 
     def _run_coregistration_subprocess(self, ref_path, tgt_path):
@@ -592,6 +684,7 @@ class UChangeDialog(QDialog):
         area = self._area_arg()
         if area:
             cmd.extend(["--extent", area])
+            self._log(f"Area to process: {area} ({self.extent_box.outputCrs().authid() or 'raster coordinates'})")
 
         if scd_mode and not self._is_labelled():
             cmd.extend(["--mode", "semantic"])

@@ -108,11 +108,16 @@ def crop_to_extent(before_path, after_path, extent, out_dir):
     if not (xmax > xmin and ymax > ymin):
         raise ValueError("the area is empty (xmax must exceed xmin and ymax ymin)")
     b = gdal.Open(before_path)
+    if b.GetGeoTransform(can_return_null=True) is None:
+        raise ValueError("the before raster has no georeferencing; an area can only be chosen "
+                         "on georeferenced rasters (process the whole image instead)")
     bx0, by0, bx1, by1 = _raster_bounds(b)
+    asked = (xmin, ymin, xmax, ymax)
     xmin, ymin, xmax, ymax = max(xmin, bx0), max(ymin, by0), min(xmax, bx1), min(ymax, by1)
     px = abs(b.GetGeoTransform()[1])
     if xmax - xmin < 32 * px or ymax - ymin < 32 * px:
-        raise ValueError("the area is outside the before raster, or under 32 pixels across")
+        raise ValueError("the area (%.10g, %.10g - %.10g, %.10g) does not overlap the before raster "
+                         "(%.10g, %.10g - %.10g, %.10g) by 32 pixels or more" % (asked + (bx0, by0, bx1, by1)))
     srs_b = osr.SpatialReference()
     srs_b.ImportFromWkt(b.GetProjection())
     units = srs_b.GetLinearUnitsName() if srs_b.IsProjected() else "degree"
