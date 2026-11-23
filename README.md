@@ -102,9 +102,6 @@ training data and fewer on others; on two areas outside it, it was level on one 
 worse on the other. Try it if the recommended model misses changes on angled imagery. The
 general model finds new buildings only and scores best on public building datasets.
 
-The trained weights are for research / non-commercial use (some training data is
-CC BY-NC-SA 4.0). The DINOv2 backbone is Meta's, Apache 2.0.
-
 ### Building the weights by hand
 
 The installer does this. If its download of the backbone fails, fetch
@@ -173,6 +170,10 @@ LEVIR-CD format (`train/A/`, `train/B/`, `train/label/`). The backbone stays fro
 both; about 4 GB of GPU memory is enough.
 
 ## Troubleshooting
+
+**Check an installation:** `venv/bin/python tests/smoke_test.py` runs the pipeline on a
+small synthetic pair and checks the output (about half a minute on a GPU; `--quick` skips
+the full runs).
 
 **The plugin doesn't appear in QGIS:** check it is enabled in the Plugin Manager, that the
 link in your QGIS plugins folder exists, and restart QGIS after installing.
