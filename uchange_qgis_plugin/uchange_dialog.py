@@ -438,6 +438,11 @@ class UChangeDialog(QDialog):
         self._populate_model_selector()
         self._on_mode_changed_visibility()
 
+    def _has_preset(self):
+        """The selected model runs with its tested settings (tiles, scale, threshold)."""
+        entry = self._model_registry.get(self.model_selector.currentText(), {})
+        return bool(entry.get("preset")) and not self.custom_weights_check.isChecked()
+
     def _uses_preset(self):
         """The selected model runs with a preset that offers Fast mode."""
         entry = self._model_registry.get(self.model_selector.currentText(), {})
@@ -460,6 +465,13 @@ class UChangeDialog(QDialog):
 
     def _on_mode_changed_visibility(self):
         self.fast_mode_check.setVisible(self._uses_preset())
+        # Models with a preset use the tile size and overlap they were tested with.
+        tiles = not self._has_preset()
+        for w in (self.tile_size, self.overlap):
+            w.setVisible(tiles)
+            lab = w.parent().layout().labelForField(w) if w.parent() and w.parent().layout() else None
+            if lab is not None:
+                lab.setVisible(tiles)
         self.filter_widget.setVisible(self._uses_filter() and not self._raster_output())
         # Threshold and min-area apply to everything that writes polygons.
         scd = self._raster_output()
@@ -694,10 +706,10 @@ class UChangeDialog(QDialog):
             "--output", output_dir,
             "--weights", weights,
             "--device", device,
-            "--tile-size", str(self.tile_size.value()),
-            "--overlap", str(self.overlap.value()),
             "--json-progress",
         ]
+        if not self._has_preset():          # a preset brings the tile settings it was tested with
+            cmd.extend(["--tile-size", str(self.tile_size.value()), "--overlap", str(self.overlap.value())])
         if self.max_vram.value() and device != "cpu":
             cmd.extend(["--max-vram", str(self.max_vram.value())])
         area = self._area_arg()

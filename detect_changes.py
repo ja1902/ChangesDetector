@@ -355,7 +355,8 @@ def resolve_threshold(args, preset):
         if preset.get("tta") and not args.tta:
             fast += (" (fast mode: no flip averaging)" if "fast_threshold" in preset else
                      " (fast mode: no flip averaging; threshold tested with flip averaging)")
-        _log(f"Recommended threshold for this model: {args.threshold:.2f}{fast}")
+        if not getattr(args, "filter_false_alarms", False):   # with the filter, it sets the outlines
+            _log(f"Recommended threshold for this model: {args.threshold:.2f}{fast}")
     elif args.threshold == "auto":
         args.auto_threshold = True
         args.threshold = 0.5  # placeholder, will be computed after inference
@@ -550,6 +551,8 @@ def main():
     h, w = before_img.shape[:2]
     _log(f"Image size: {w}x{h}")
     thresh_str = "auto" if args.auto_threshold else f"{args.threshold}"
+    if args.filter_false_alarms and threshold_was_auto:
+        thresh_str = "set by the false-alarm filter"
     _log(f"Tile size: {args.tile_size}, overlap: {args.overlap}, threshold: {thresh_str}")
 
     # Resolution: the model's own scale, times an upsampling for coarse imagery.
