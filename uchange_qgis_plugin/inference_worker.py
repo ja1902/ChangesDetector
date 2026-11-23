@@ -158,7 +158,7 @@ class ChangeDetectionInferenceTask(QgsTask):
             binary_mask, geotransform, projection_wkt,
             p["output_path"], min_area=min_area_map,
         )
-        self._log(f"Polygons: {total_polys} created, {final_polys} after min-area filter")
+        self._log(f"Changes written: {final_polys} (of {total_polys}; the rest under the minimum area)")
         self.setProgress(100)
         self._log("Done!")
         return True

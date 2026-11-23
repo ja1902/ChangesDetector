@@ -136,8 +136,11 @@ def save_comparison(path, panels):
     Image.fromarray(np.concatenate(small, axis=1)).save(path, compress_level=1)
 
 
-def landcover_labels(model, head, device, binary_mask, before_img, after_img, lc_factor):
-    """Change blobs and their (from, to) land cover: (blob ids, from_cls, to_cls)."""
+def landcover_labels(model, head, device, binary_mask, before_img, after_img, lc_factor,
+                     filter_labels=None):
+    """Change blobs and their (from, to) land cover: (blob ids, from_cls, to_cls).
+
+    filter_labels (the filter's change ids) joins the pieces of one filtered change."""
     from PIL import Image
     from uchange_qgis_plugin.landcover import label_blobs, predict_landcover
     from uchange_qgis_plugin.raster_io import _smooth_mask
@@ -153,7 +156,7 @@ def landcover_labels(model, head, device, binary_mask, before_img, after_img, lc
         if lc.shape != (h, w):
             lc = np.array(Image.fromarray(lc).resize((w, h), Image.NEAREST))
         maps.append(lc)
-    return label_blobs(_smooth_mask(binary_mask), *maps)
+    return label_blobs(_smooth_mask(binary_mask), *maps, filter_labels=filter_labels)
 
 
 def label_changes(args, model, head, device, binary_mask, before_img, after_img,
@@ -169,7 +172,8 @@ def label_changes(args, model, head, device, binary_mask, before_img, after_img,
     from uchange_qgis_plugin.raster_io import change_name, polygonize_labelled_changes, save_semantic_geotiff
 
     blobs, from_cls, to_cls = landcover_labels(model, head, device, binary_mask,
-                                               before_img, after_img, lc_factor)
+                                               before_img, after_img, lc_factor,
+                                               filter_labels=(scores or {}).get("filter_labels"))
     gt, proj = geo_info["geotransform"], geo_info["projection"]
     out = {"mode": "labelled"}
     for tag, cls in (("from", from_cls), ("to", to_cls)):
@@ -191,7 +195,7 @@ def label_changes(args, model, head, device, binary_mask, before_img, after_img,
             blobs, from_cls, to_cls, LANDCOVER_CLASSES, gt, proj, args.output_gpkg,
             min_area=args.min_area * px_area,
             style="convex hull" if args.style == "convex" else args.style, **(scores or {}))
-        _log(f"Polygons: {total} created, {final} after min-area filter")
+        _log(f"Changes written: {final} (of {total}; the rest under the minimum area)")
         out.update(output_path=args.output_gpkg, total_polys=total, final_polys=final)
     return out
 
@@ -733,7 +737,7 @@ def main():
                 binary_mask, geo_info["geotransform"], geo_info["projection"],
                 args.output_gpkg, min_area=min_area_map, style=style, **scores,
             )
-            _log(f"Polygons: {total_polys} created, {final_polys} after min-area filter")
+            _log(f"Changes written: {final_polys} (of {total_polys}; the rest under the minimum area)")
             result_info["output_path"] = args.output_gpkg
             result_info["total_polys"] = total_polys
             result_info["final_polys"] = final_polys

@@ -656,7 +656,7 @@ class UChangeDialog(QDialog):
         if os.path.isfile(gpkg_path):
             total_polys = result_info.get("total_polys", 0)
             final_polys = result_info.get("final_polys", 0)
-            self._log(f"Polygons: {total_polys} created, {final_polys} after filter")
+            self._log(f"Changes written: {final_polys} (of {total_polys}; the rest under the minimum area)")
 
             if self.add_to_project.isChecked():
                 layer = QgsVectorLayer(gpkg_path, "Change Detection", "ogr")
@@ -698,8 +698,8 @@ class UChangeDialog(QDialog):
                 self._log(f"Saved: {dest}")
         if not os.path.isfile(gpkg_path):
             return
-        self._log(f"Polygons: {result_info.get('total_polys', 0)} created, "
-                  f"{result_info.get('final_polys', 0)} after filter")
+        self._log(f"Changes written: {result_info.get('final_polys', 0)} (of "
+                  f"{result_info.get('total_polys', 0)}; the rest under the minimum area)")
         if not self.add_to_project.isChecked():
             return
         layer = QgsVectorLayer(gpkg_path, "Labelled change", "ogr")

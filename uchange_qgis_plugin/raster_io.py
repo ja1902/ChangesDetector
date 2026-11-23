@@ -232,16 +232,19 @@ def change_scores(ids, n, prob=None, filter_labels=None, filter_real=None):
 
 def polygonize_changes(ids, geotransform, projection_wkt, output_path, fields=(),
                        min_area=0, style='exact'):
-    """Change ids -> GeoPackage polygons, one per change (8-connected), with attributes.
+    """Change ids -> GeoPackage features, one per change id, with attributes.
+
+    A change whose pixels form several separate pieces is written as one MultiPolygon.
 
     Args:
         ids: 2D int32 array of change ids (0 = no change)
         fields: (name, kind, values) with kind "int", "real" or "str" and values indexed by
             change id; NaN / None values are left empty
-        min_area: minimum polygon area in map units; smaller polygons are removed
+        min_area: minimum area of a change in map units (all its pieces together);
+            smaller changes are removed
         style: 'exact', 'simplified', or 'convex hull'
     Always writes "id" (the change id) and "area" (map units^2, after styling).
-    Returns (polygons created, polygons kept).
+    Returns (changes found, changes kept).
     """
     h, w = ids.shape
     mem_ds = gdal.GetDriverByName("MEM").Create("", w, h, 1, gdal.GDT_Int32)
@@ -251,6 +254,18 @@ def polygonize_changes(ids, geotransform, projection_wkt, output_path, fields=()
     write_band(mem_band, ids.astype(np.int32))
     mem_band.FlushCache()
 
+    # pieces: one polygon per 8-connected region of each id, in memory first
+    tmp_ds = ogr.GetDriverByName("Memory").CreateDataSource("")
+    tmp = tmp_ds.CreateLayer("pieces", geom_type=ogr.wkbPolygon)
+    tmp.CreateField(ogr.FieldDefn("id", ogr.OFTInteger))
+    gdal.Polygonize(mem_band, mem_band, tmp, 0, ["8CONNECTED=8"], callback=None)
+    pieces = {}
+    tmp.ResetReading()
+    for feat in tmp:
+        geom = feat.GetGeometryRef()
+        if geom is not None:
+            pieces.setdefault(feat.GetField("id"), []).append(geom.Clone())
+
     gpkg_driver = ogr.GetDriverByName("GPKG")
     if gpkg_driver is None:
         raise RuntimeError("GPKG OGR driver not available")
@@ -259,41 +274,52 @@ def polygonize_changes(ids, geotransform, projection_wkt, output_path, fields=()
     if projection_wkt:
         srs = osr.SpatialReference()
         srs.ImportFromWkt(projection_wkt)
-    layer = out_ds.CreateLayer("changes", srs=srs, geom_type=ogr.wkbPolygon)
+    layer = out_ds.CreateLayer("changes", srs=srs, geom_type=ogr.wkbMultiPolygon)
     layer.CreateField(ogr.FieldDefn("id", ogr.OFTInteger))
     kinds = {"int": ogr.OFTInteger, "real": ogr.OFTReal, "str": ogr.OFTString}
     for name, kind, _ in fields:
         layer.CreateField(ogr.FieldDefn(name, kinds[kind]))
     layer.CreateField(ogr.FieldDefn("area", ogr.OFTReal))
 
-    gdal.Polygonize(mem_band, mem_band, layer, 0, ["8CONNECTED=8"], callback=None)
-    total = layer.GetFeatureCount()
+    total = len(pieces)
     pixel_w = abs(geotransform[1])
-
-    layer.ResetReading()
-    to_delete = []
-    for feat in layer:
-        geom = feat.GetGeometryRef()
-        if geom is None:
+    defn = layer.GetLayerDefn()
+    layer.StartTransaction()
+    for k in sorted(pieces):
+        parts = pieces[k]
+        if min_area > 0 and sum(g.GetArea() for g in parts) < min_area:
             continue
-        if min_area > 0 and geom.GetArea() < min_area:
-            to_delete.append(feat.GetFID())
+        multi = ogr.Geometry(ogr.wkbMultiPolygon)
+        for g in parts:
+            g = _apply_style(_remove_small_holes(g, min_area), style, pixel_w)
+            if g is None or g.IsEmpty():
+                continue
+            if g.GetGeometryType() in (ogr.wkbMultiPolygon, ogr.wkbMultiPolygon25D):
+                for j in range(g.GetGeometryCount()):
+                    multi.AddGeometry(g.GetGeometryRef(j))
+            elif g.GetGeometryType() in (ogr.wkbPolygon, ogr.wkbPolygon25D):
+                multi.AddGeometry(g)
+        if multi.GetGeometryCount() == 0:
             continue
-        k = feat.GetField("id")
-        geom = _apply_style(_remove_small_holes(geom, min_area), style, pixel_w)
-        feat.SetGeometry(geom)
+        if style == 'convex hull' and multi.GetGeometryCount() > 1:
+            hull = multi.ConvexHull()
+            if hull is not None and not hull.IsEmpty():
+                multi = ogr.ForceToMultiPolygon(hull)
+        feat = ogr.Feature(defn)
+        feat.SetGeometry(multi)
+        feat.SetField("id", int(k))
         for name, kind, values in fields:
             v = values[k]
             if v is None or (kind == "real" and not np.isfinite(v)):
                 continue
             feat.SetField(name, int(v) if kind == "int" else float(v) if kind == "real" else str(v))
-        feat.SetField("area", geom.GetArea())
-        layer.SetFeature(feat)
-    for fid in to_delete:
-        layer.DeleteFeature(fid)
+        feat.SetField("area", multi.GetArea())
+        layer.CreateFeature(feat)
+    layer.CommitTransaction()
     final = layer.GetFeatureCount()
     out_ds.FlushCache()
     out_ds = None
+    tmp_ds = None
     mem_ds = None
     return total, final
 
@@ -306,6 +332,28 @@ def _score_fields(n, prob, filter_labels, filter_real, ids):
     if real is not None:
         fields.append(("filter_score", "real", np.round(real, 3)))
     return fields
+
+
+def _group_by_filter(ids, n, filter_labels):
+    """Give every piece the id of the false-alarm filter's change it was drawn from.
+
+    Redrawing a kept change at the stricter outline threshold can break it into several
+    pieces; they are one change. A piece goes to the filter change covering most of it;
+    pieces on no filter change keep an id of their own. Returns (new ids, count).
+    """
+    m = ids > 0
+    k, lab = ids[m], filter_labels[m]
+    owner = np.zeros(n, np.int64)
+    sel = lab > 0
+    if sel.any():
+        pairs, cnt = np.unique(np.stack([k[sel], lab[sel]], 1), axis=0, return_counts=True)
+        order = np.lexsort((-cnt, pairs[:, 0]))         # per piece, the most covering change first
+        first = np.unique(pairs[order, 0], return_index=True)[1]
+        owner[pairs[order][first, 0]] = pairs[order][first, 1]
+    key = np.where(owner > 0, owner, -np.arange(n))     # pieces with no filter change stay apart
+    _, new = np.unique(key[1:], return_inverse=True)
+    remap = np.concatenate([[0], new + 1]).astype(np.int32)
+    return remap[ids], int(new.max()) + 2 if len(new) else 1
 
 
 def polygonize_mask(binary_mask, geotransform, projection_wkt, output_path,
@@ -325,6 +373,8 @@ def polygonize_mask(binary_mask, geotransform, projection_wkt, output_path,
     """
     import cv2
     n, ids = cv2.connectedComponents(_smooth_mask(binary_mask.astype(np.uint8)), connectivity=8)
+    if filter_labels is not None and n > 1:
+        ids, n = _group_by_filter(ids, n, filter_labels)
     fields = [("change", "int", np.ones(n, np.int64))]
     fields += _score_fields(n, prob, filter_labels, filter_real, ids)
     return polygonize_changes(ids, geotransform, projection_wkt, output_path, fields,

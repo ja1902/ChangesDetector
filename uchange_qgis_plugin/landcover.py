@@ -134,14 +134,19 @@ def predict_landcover(model, head, img, device, window=448, overlap=96, batch=8,
     return out[:h, :w]
 
 
-def label_blobs(change_mask, lc_before, lc_after):
+def label_blobs(change_mask, lc_before, lc_after, filter_labels=None):
     """One (from, to) class per change blob: the majority inside it.
 
+    filter_labels: the false-alarm filter's change id per pixel, if it ran; pieces of one
+    filter change then count as one blob (see raster_io._group_by_filter).
     Returns (blob ids int32 (H, W), from_cls, to_cls) where from_cls[k] /
     to_cls[k] belong to blob k (index 0 unused).
     """
     import cv2
     n, blobs = cv2.connectedComponents(change_mask.astype(np.uint8), connectivity=8)
+    if filter_labels is not None and n > 1:
+        from .raster_io import _group_by_filter
+        blobs, n = _group_by_filter(blobs, n, filter_labels)
     k = len(LANDCOVER_CLASSES)
     m = blobs > 0
     ids = blobs[m].astype(np.int64)
