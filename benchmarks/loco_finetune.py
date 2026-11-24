@@ -45,7 +45,7 @@ gdal.UseExceptions()
 
 def infer(weights, folder, device):
     import detect_changes as dc
-    from uchange_qgis_plugin.model_bridge import build_model
+    from uchange_qgis_plugin.model_bridge import build_model, _model_cache
     from uchange_qgis_plugin.resolution import working_factor
     p = pipeline_args(["--weights", str(weights), "--preset", "synthetic"])
     if "slim_base" in torch.load(weights, map_location="cpu", weights_only=False, mmap=True)["config"]:
@@ -62,6 +62,7 @@ def infer(weights, folder, device):
     b, _ = dc.read_image(str(folder / "after.tif"))
     factor, _, _ = working_factor(geo, p.target_gsd, p.scale, a.shape)
     prob = dc.infer_probability(p, model, None, a, b, factor, device)
+    _model_cache.clear()                             # build_model keeps every model it loads
     del model
     torch.cuda.empty_cache()
     return prob, geo, p.threshold

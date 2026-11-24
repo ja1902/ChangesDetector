@@ -5,6 +5,43 @@ details and every result behind these choices are in [EXPERIMENTS.md](EXPERIMENT
 
 ## v0.10
 
+### Faster filter, small GPUs, faster on the CPU (v0.10.2)
+
+Same results as v0.10.1 wherever the GPU has room for 8 tiles, and on the CPU: on a test
+pair (1 km2 at 0.49 m) the GeoPackage is byte for byte the same (GPU: the whole pair; CPU,
+normal and Fast mode: a 500 m area of it). Measured on that pair, the same machine before
+and after, the two versions run in turn:
+
+| | v0.10.1 | v0.10.2 |
+|---|---|---|
+| GPU, whole run | 67-68 s | 53-58 s |
+| of which the false-alarm filter | 28 s | 18-19 s |
+| CPU (24 threads), a 500 m area | 268-270 s | 187-206 s |
+| CPU with Fast mode, same area | 172 s | 110 s |
+
+- **The false-alarm filter judges in two steps**: every candidate is first scored on one of
+  its four rotations, and the other three are added only where that quick score comes
+  within 1.75 (logit) of the "keep if real" cut. On 15 test areas (3,772 candidates, both
+  filters) the quick score was never more than 1.21 below the full one, so the candidates it
+  rules out are far from being kept, and those it finishes get exactly the score they got
+  before. At the default "keep if real" this skips about 40% of the filter's work; at a much
+  lower setting nearly every candidate is finished, as before.
+- **Small or shared GPUs**: where 8 tiles do not fit in the free memory (or under the "GPU
+  memory limit"), the model still runs 8 tiles at a time but decodes them a few at a time
+  (about 0.25 GB instead of 0.8 GB), instead of dropping to smaller, slower batches; and the
+  filter splits its passes if the GPU runs out of memory. The whole run now works under a
+  450 MB limit (peak 0.4 GB); v0.10.1 ran out of memory in the filter at 600 MB. On the 13
+  areas of the custom dataset this decoding is level with the usual one (curve mean 66.1%
+  both, +0.1 [-0.1, +0.2]), the same kind of float16 rounding difference smaller batches
+  already gave.
+- **CPU: one core left free**: PyTorch used every logical CPU, so one busy core (the tile
+  preparation, QGIS, another program) held all the others up: on a 24-thread machine a tile
+  took 0.76 s with 23 threads against 1.15 s with 24. The default is now one fewer than the
+  CPU has (where there is no hyperthreading to leave room); `--threads N` sets it. The CPU
+  time estimates in the dialog and the CLI are now ~22 minutes per km2, ~12 with Fast mode.
+- Smaller: the backbone's positional embedding is resized once per tile size instead of in
+  every pass, and the filter prepares its next crops while the GPU works.
+
 ### Process only an area, one feature per change (v0.10.1)
 
 - **Process only an area**: the dialog has a "Process only an area" box (the current map

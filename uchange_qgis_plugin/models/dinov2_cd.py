@@ -96,6 +96,20 @@ class VisionTransformer(nn.Module):
         N = self.pos_embed.shape[1] - 1
         if num_patches == N:
             return self.pos_embed
+        # Without gradients the result depends only on num_patches and the weights, so
+        # it is computed once per tile size: the bicubic resize took ~9 ms of each
+        # ~260 ms forward on a T4. Same values as recomputing it.
+        if torch.is_grad_enabled():
+            return self._resize_pos_embed(num_patches)
+        p = self.pos_embed
+        weights = (p.device, p.dtype, p.data_ptr(), p._version)
+        cache = self.__dict__.setdefault("_pos_cache", {})
+        if cache.get(num_patches, (None,))[0] != weights:      # new size, or weights changed
+            cache[num_patches] = (weights, self._resize_pos_embed(num_patches))
+        return cache[num_patches][1]
+
+    def _resize_pos_embed(self, num_patches):
+        N = self.pos_embed.shape[1] - 1
         cls_pos = self.pos_embed[:, :1]
         patch_pos = self.pos_embed[:, 1:]
         dim = patch_pos.shape[-1]
@@ -224,6 +238,12 @@ class MultiLayerChangeDecoder(nn.Module):
 
 
 class DINOv2ChangeDetector(nn.Module):
+    # Tiles the decoder takes at once (None = the whole batch). Nearly all of the model's
+    # memory is decoder feature maps (the 144 x 144 ones of a 252 px tile), so decoding a
+    # batch a few tiles at a time keeps the backbone's batch while needing a fraction of
+    # the memory.
+    decoder_chunk = None
+
     def __init__(self, backbone, decoder, layer_indices):
         super().__init__()
         self.backbone = backbone
@@ -255,7 +275,12 @@ class DINOv2ChangeDetector(nn.Module):
         with torch.no_grad():
             # Both dates in one backbone call: better GPU use at small batches.
             feats = self.extract_multilayer_features(torch.cat([img_a, img_b]))
-        return self.decoder([f[:b] for f in feats], [f[b:] for f in feats], out_size=out_size)
+        c = self.decoder_chunk or b
+        if c >= b:
+            return self.decoder([f[:b] for f in feats], [f[b:] for f in feats], out_size=out_size)
+        return torch.cat([self.decoder([f[i:min(i + c, b)] for f in feats],
+                                       [f[b + i:b + min(i + c, b)] for f in feats], out_size=out_size)
+                          for i in range(0, b, c)])
 
     def train(self, mode=True):
         super().train(mode)

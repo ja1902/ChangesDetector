@@ -36,6 +36,14 @@ MIN_BLOB_M2 = 50.0        # smaller blobs were never judged (nor scored)
 CONTEXT_M, MIN_HALF_M = 15.0, 20.0
 RING_M = 8.0
 BATCH = 4          # blobs per DINOv2 pass in the filter (32 crops)
+_CROPS = 8 * BATCH        # crops per DINOv2 pass (2 dates per blob and rotation)
+# Cascade: every candidate is first judged on one rotation of its crops; the other three
+# are added only where that quick score comes within CASCADE_MARGIN (logit) of the keep
+# cut. On 15 squares (3,772 candidates) the quick score was never more than 1.21 below the
+# full one with either filter (99.9% within 1.01), so a candidate it rules out is far from
+# being kept; those that are finished get exactly the full score (bit for bit). At the
+# default cut this skips ~40% of the filter's work, less at lower cuts.
+CASCADE_MARGIN = 1.75
 ORPHAN_SMOOTH_M, ORPHAN_SEP_M, ORPHAN_R_M = 1.0, 5.0, 15.0
 _ROWS = 2048              # orphan search works on strips of this many rows
 
@@ -60,6 +68,7 @@ class _Features:
     def __init__(self, backbone, device, size, layers):
         self.bb, self.dev, self.size, self.layers = backbone, device, int(size), tuple(int(l) for l in layers)
         self.dtype = next(backbone.parameters()).dtype
+        self.max_items = _CROPS // 2          # (blob, rotation) items per DINOv2 pass
 
     @torch.no_grad()
     def _tokens(self, x):
@@ -76,6 +85,26 @@ class _Features:
             if i >= max(self.layers):
                 break
         return out
+
+    def _tokens_fitting(self, xs):
+        """_tokens of the crops xs (k, 2, 3, S, S), in smaller passes if the GPU runs out
+        of memory (the features of a crop do not depend on the others in its pass)."""
+        k, S = xs.shape[0], xs.shape[-1]
+        while True:
+            step = min(k, self.max_items)
+            parts = []
+            try:
+                for i in range(0, k, step):
+                    batch = torch.tensor(xs[i:i + step], device=self.dev).reshape(-1, 3, S, S).to(self.dtype)
+                    with torch.autocast("cuda", dtype=torch.float16, enabled=self.dev.type == "cuda"):
+                        parts.append(self._tokens(batch))
+                return parts[0] if len(parts) == 1 else [torch.cat(f) for f in zip(*parts)]
+            except RuntimeError as e:             # torch.OutOfMemoryError is one
+                if "out of memory" not in str(e).lower() or step <= 1:
+                    raise
+            parts = batch = None                  # outside the handler: frees the tensors
+            torch.cuda.empty_cache()
+            self.max_items = max(1, step // 2)
 
     def _prep(self, im):
         t = np.asarray(Image.fromarray(np.ascontiguousarray(im[..., :3])).resize((self.size, self.size), Image.LANCZOS))
@@ -99,33 +128,69 @@ class _Features:
         x = np.stack([self._prep(_crop(A, *win)), self._prep(_crop(B, *win))])
         return x, w_in, w_ring
 
+    def _rotated(self, A, B, pixels, gsd, items):
+        """Crops (len(items), 2, 3, S, S) float32 for (blob, rotation) items, and the
+        token-grid weights {blob: (w_in, w_ring)} of their blobs."""
+        xs, weights, last = [], {}, (None, None)
+        for u, r in items:
+            if last[0] != u:
+                x, w_in, w_ring = self._inputs(A, B, *pixels[u], gsd)
+                weights[u] = (w_in, w_ring)
+                last = (u, x)
+            xs.append(np.rot90(last[1], r, (2, 3)))
+        return np.stack(xs), weights
+
     @torch.no_grad()
-    def blobs(self, A, B, pixels, gsd):
-        """[(L, 2 in/ring, 2 dates, 768)] for the blobs given as (ys, xs), averaged over 4
-        rotations; BATCH blobs go through DINOv2 together (same result as one at a time)."""
-        out = []
-        for b0 in range(0, len(pixels), BATCH):
-            inp = [self._inputs(A, B, ys, xs, gsd) for ys, xs in pixels[b0:b0 + BATCH]]
-            x = torch.tensor(np.stack([i[0] for i in inp]), device=self.dev)       # (k, 2, 3, S, S)
-            k, S = x.shape[0], x.shape[-1]
-            rot = torch.stack([torch.rot90(x, r, (3, 4)) for r in range(4)], 1)      # (k, 4, 2, 3, S, S)
-            batch = rot.reshape(k * 8, 3, S, S).to(self.dtype)
-            with torch.autocast("cuda", dtype=torch.float16, enabled=self.dev.type == "cuda"):
-                feats = self._tokens(batch)
-            for j, (_, w_in, w_ring) in enumerate(inp):
-                w_in = torch.tensor(w_in, device=self.dev)
-                w_ring = torch.tensor(w_ring, device=self.dev)
+    def rotations(self, A, B, pixels, gsd, items, progress_fn=None, cancel_fn=None):
+        """{(blob, rotation): (L, 2 in/ring, 2 dates, 768)} for the (blob index, rotation
+        0-3) items; the crops of _CROPS // 2 items go through DINOv2 together, while the
+        next ones are prepared on the CPU. None if cancelled."""
+        from concurrent.futures import ThreadPoolExecutor
+        step = _CROPS // 2
+        chunks = [items[i:i + step] for i in range(0, len(items), step)]
+        out = {}
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            nxt = pool.submit(self._rotated, A, B, pixels, gsd, chunks[0]) if chunks else None
+            for c, chunk in enumerate(chunks):
+                if cancel_fn and cancel_fn():
+                    nxt.cancel()
+                    return None
+                xs, weights = nxt.result()
+                if c + 1 < len(chunks):
+                    nxt = pool.submit(self._rotated, A, B, pixels, gsd, chunks[c + 1])
+                feats = self._tokens_fitting(xs)
                 res = []
-                for f in feats:                                   # (k*8, g, g, C)
-                    acc = 0
-                    for r in range(4):
-                        fk = torch.rot90(f[j * 8 + 2 * r:j * 8 + 2 * r + 2].float(), -r, (1, 2))
+                for j, (u, r) in enumerate(chunk):
+                    w_in, w_ring = weights[u]
+                    w_in = torch.tensor(w_in, device=self.dev)
+                    w_ring = torch.tensor(w_ring, device=self.dev)
+                    per_layer = []
+                    for f in feats:                               # (2k, g, g, C)
+                        fk = torch.rot90(f[2 * j:2 * j + 2].float(), -r, (1, 2))
                         fi = (fk * w_in[None, ..., None]).sum((1, 2)) / (w_in.sum() + 1e-6)
                         fr = (fk * w_ring[None, ..., None]).sum((1, 2)) / (w_ring.sum() + 1e-6)
-                        acc = acc + torch.stack([fi, fr])
-                    res.append(acc / 4)
-                out.append(torch.stack(res).cpu().numpy())
+                        per_layer.append(torch.stack([fi, fr]))
+                    res.append(torch.stack(per_layer))
+                for item, v in zip(chunk, torch.stack(res).cpu().numpy()):
+                    out[item] = v
+                if progress_fn:
+                    progress_fn(c + 1, len(chunks))
         return out
+
+    @staticmethod
+    def averaged(rot):
+        """Mean over the 4 rotations, summed in the order the filter was trained with."""
+        acc = 0
+        for r in range(4):
+            acc = acc + rot[r]
+        return acc / 4
+
+    def blobs(self, A, B, pixels, gsd):
+        """[(L, 2 in/ring, 2 dates, 768)] for the blobs given as (ys, xs), averaged over 4
+        rotations (crops of several blobs go through DINOv2 together: same result as one
+        at a time)."""
+        rot = self.rotations(A, B, pixels, gsd, [(u, r) for u in range(len(pixels)) for r in range(4)])
+        return [self.averaged([rot[(u, r)] for r in range(4)]) for u in range(len(pixels))]
 
     def blob(self, A, B, ys, xs, gsd):
         """(L, 2 in/ring, 2 dates, 768) for one blob, averaged over 4 rotations."""
@@ -223,20 +288,39 @@ def orphans(prob, comp, judged, gsd, peak_level, min_px):
     return out, m
 
 
+class _Pixels:
+    """(ys, xs) of each judged unit (label image, slice, id), found when asked for."""
+
+    def __init__(self, units):
+        self.units = units
+
+    def __len__(self):
+        return len(self.units)
+
+    def __getitem__(self, k):
+        lab, sl, i = self.units[k]
+        ys, xs = np.nonzero(lab[sl] == i)
+        return ys + sl[0].start, xs + sl[1].start
+
+
 def filter_mask(prob, before, after, backbone, gsd, flt, device, low=0.6, redraw=0.83,
-                min_score=0.46, orphan_peak=None, progress_fn=None, cancel_fn=None):
+                min_score=0.46, orphan_peak=None, progress_fn=None, cancel_fn=None,
+                cascade_margin=CASCADE_MARGIN):
     """Binary mask (uint8) of the kept, redrawn blobs, and a stats dict.
 
     prob: change probabilities (H, W) at the images' resolution; before, after: the
     images (H, W, 3) uint8; gsd: pixel size in metres; low: threshold the blobs are
     found at; redraw: threshold kept blobs are drawn at; min_score: a blob is kept if the
     classifier's probability that it is real is at least this; orphan_peak: also judge
-    the weaker changes peaking at this level outside the blobs (None = off).
+    the weaker changes peaking at this level outside the blobs (None = off);
+    cascade_margin: judge each candidate on one rotation first and finish only those whose
+    quick score is within this of the cut (None = all four rotations for every one).
 
     stats: "blobs" (judged), "kept", "orphans" (judged), "orphans_kept", and for
     per-polygon scores "labels" (int32 (H, W), the blob or orphan each pixel belongs to,
     0 = none) with "real_prob" (per id: the classifier's probability that it is real,
-    NaN where not judged).
+    NaN where not judged; from the quick 1-rotation look for candidates it ruled out),
+    "finished" (candidates judged on all four rotations).
     """
     import cv2
     from scipy import ndimage as ndi
@@ -250,29 +334,47 @@ def filter_mask(prob, before, after, backbone, gsd, flt, device, low=0.6, redraw
     oslices = ndi.find_objects(olab) if m else []
     slices = ndi.find_objects(comp)
     units = [(comp, slices[i - 1], i) for i in ids] + [(olab, sl, j) for j, sl in enumerate(oslices, 1)]
+    pix = _Pixels(units)
+    p90 = [np.percentile(prob[ys, xs], 90) for ys, xs in pix]
+    cut = _logit(np.array(min_score))
     fx = _Features(backbone, device, flt["size"], flt["layers"])
-    feats, p90 = [], []
-    for b0 in range(0, len(units), BATCH):
-        if cancel_fn and cancel_fn():
-            return None, None
-        pix = []
-        for lab, sl, i in units[b0:b0 + BATCH]:
-            ys, xs = np.nonzero(lab[sl] == i)
-            pix.append((ys + sl[0].start, xs + sl[1].start))
-            p90.append(np.percentile(prob[pix[-1][0], pix[-1][1]], 90))
-        feats += fx.blobs(before, after, pix, gsd)
+    nu = len(units)
+    cascade = cascade_margin is not None
+    # progress in (blob, rotation) items; until the quick look is done, assume every
+    # candidate needs finishing, so the bar never moves back
+    work = [nu * (1 if cascade else 4), 3 * nu if cascade else 0]
+
+    def report(offset, n_items):
         if progress_fn:
-            progress_fn(min(b0 + BATCH, len(units)), len(units))
+            return lambda c, t: progress_fn(offset + min(c * (_CROPS // 2), n_items), sum(work))
+
+    first = [(u, r) for u in range(nu) for r in ((0,) if cascade else range(4))]
+    rot = fx.rotations(before, after, pix, gsd, first, report(0, len(first)), cancel_fn)
+    if rot is None:
+        return None, None
+    finish = []
+    if cascade and nu:
+        quick = score(flt, np.stack([rot[(u, 0)] for u in range(nu)]), np.array(p90))
+        finish = [u for u in range(nu) if quick[u] >= cut - cascade_margin]
+        work[1] = 3 * len(finish)
+        more = fx.rotations(before, after, pix, gsd, [(u, r) for u in finish for r in (1, 2, 3)],
+                            report(work[0], work[1]), cancel_fn)
+        if more is None:
+            return None, None
+        rot.update(more)
+    full = set(finish) if cascade else set(range(nu))
+    # A candidate the quick look rules out keeps its 1-rotation features (and score).
+    feats = [fx.averaged([rot[(u, r)] for r in range(4)]) if u in full else rot[(u, 0)]
+             for u in range(nu)]
     out = np.zeros(prob.shape, np.uint8)
     real_prob = np.full(n + m, np.nan, np.float32)
     stats = {"blobs": len(ids), "kept": 0, "orphans": m, "orphans_kept": 0, "labels": comp,
-             "real_prob": real_prob}
+             "real_prob": real_prob, "finished": len(full)}
     if not units:
         return out, stats
     sc = score(flt, np.stack(feats), np.array(p90))
     s, so = sc[:len(ids)], sc[len(ids):]
     real_prob[ids] = 1 / (1 + np.exp(-s))
-    cut = _logit(np.array(min_score))
     for j, sl in enumerate(oslices, 1):          # orphans join the labels as ids n .. n+m-1
         reg = olab[sl] == j
         comp[sl][reg] = n + j - 1

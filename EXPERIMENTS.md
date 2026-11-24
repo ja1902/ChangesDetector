@@ -286,6 +286,36 @@ on its own held-out maps. Retrain it with `finetune_dinov2.py --levir <S2Looking
 --partner-dirs Image1,Image2 --partner-crop 370 --seed 1` on all 13 squares.
 
 
+## Speed and GPU memory (v0.10.2)
+
+Profiled on pr2_c1 (1 km2 at 0.49 m; GPU: a T4; CPU: 24 threads). GPU run: inference 31 s, of which flip averaging 22 s (98%
+of tiles reach the 0.5 gate), the filter 28 s (DINOv2 on its crops 23 s). The decoder costs
+as much as the backbone (131 against 134 ms per 8 tiles). Peak 1.04 GB, 0.8 GB of it
+decoder feature maps. CPU, a 500 m area: inference 70% (flips three quarters of it), the
+filter 30%. Float16 results depend on the batch size (8 against 4 tiles: up to 0.017 in
+probability, 5 of 22 outlines move a little); the same run repeated is byte for byte the same.
+
+| idea | result |
+|---|---|
+| **filter: one rotation first**, the other three only within 1.75 logit of the cut | **kept**: filter 28 -> 18-19 s on the GPU, 86-88 -> 47-49 s on the CPU area; output byte for byte the same. On 15 areas (3,772 candidates) the 1-rotation score is at most 1.21 below the full one (99.9% within 1.01) with either filter |
+| **decode a few tiles at a time when memory is short** (keep 8 tiles per batch) | **kept**: 0.8 -> 0.23 GB for 8 tiles at +3% time; 0.4% of map pixels move by 1/255; 13 areas with the filter: curve mean 66.1% both, +0.1 [-0.1, +0.2] |
+| **CPU: one thread fewer than cores** | **kept**: 0.76 against 1.15 s per tile with one other busy process; same results |
+| **resize the positional embedding once** | **kept**: 9 ms of each 260 ms pass on the T4; same results |
+| skip weaker changes that provably cannot reach the cut (the score is linear) | nothing to skip: the tightest exact bound on stage 1 is 102 logit, so only a p90 under 1e-28 is ruled out |
+| skip weaker changes by their map p90 | no: p90 barely predicts the score (r = 0.32); p90 < 0.5 drops 24% of them but 21 of the 158 that pass the 20/km2 cut |
+| channels_last, cudnn.benchmark | no gain |
+| flash attention | not on a T4 (needs sm80); the memory-efficient kernel is already used |
+| torch.compile on the decoder | 10% faster, but 16 s to compile in every run, and not exact |
+| a higher flip gate | little to gain: 78% of tiles still reach 0.8 on pr2_c1 |
+| loading the model during co-registration | dropped: AROSICS's helpers use multiprocessing, and forking while torch loads in another thread can deadlock, for ~1.5 s |
+| CPU batch of 8 | -10% to +2% depending on threads; not taken |
+
+Not tried yet, would need the full revalidation: fewer flips at inference (2 instead of 4),
+fewer rotations in the filter, reusing the main pass's features in the filter (retraining
+it), ONNX Runtime / OpenVINO on the CPU (to be measured on a machine with AVX2).
+Scripts: work_dirs/exp_speed (maps.py; logs maps_dc2.log, polyfilter_lc13cdc2.log,
+paired_lc13cdc2.log).
+
 ## Caveats
 
 - **Ground truth comes from the union of the detectors' candidates**, plus what the

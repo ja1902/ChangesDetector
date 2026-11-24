@@ -5,7 +5,7 @@ of the same place: new buildings, construction sites, demolitions and cleared la
 outlines every change as a polygon, with a score for how likely it is to be real, and can
 also say what each area changed from and into ("farmland -> building").
 
-It runs on a GPU (under a minute per km² at 0.5 m) or on a CPU (about half an hour per km²),
+It runs on a GPU (under a minute per km² at 0.5 m) or on a CPU (about 22 minutes per km²),
 and inference runs in its own Python environment, so it works with any QGIS 3.22+.
 
 - What changed in each version: [CHANGELOG.md](CHANGELOG.md)
@@ -155,6 +155,7 @@ Main options:
 | `--min-area-m2 50` | drop smaller changes (`--min-area` in pixels also works) |
 | `--fast` | skip flip averaging |
 | `--device auto\|cpu\|gpu`, `--max-vram MB` | where to run, and a GPU memory limit |
+| `--threads N` | CPU threads (default: one fewer than the CPU has) |
 | `--no-coreg`, `--max-shift 50` | co-registration |
 | `--target-gsd 0.5` | resample coarser imagery to this pixel size (0: off) |
 | `--threshold auto\|0.3` | change threshold (auto: the one each model was tested with) |
@@ -192,12 +193,15 @@ tick "Use custom weights file" to point to your own checkpoint.
 
 **"CUDA GPU is not available":** choose CPU as the device, or install the NVIDIA drivers.
 
-**GPU out of memory:** close other programs that use the GPU. The DINOv2 models need about
-0.4 GB (plus about 0.3 GB for the driver); the batch size follows the free memory, and a
-"GPU memory limit" below what the model needs fails with a clear message.
+**GPU out of memory:** close other programs that use the GPU, or set a "GPU memory limit".
+With room, a run takes about 1.1 GB (plus about 0.3 GB for the driver); on a smaller or
+shared GPU the model decodes its tiles a few at a time and the false-alarm filter splits its
+passes, so the whole run works under a 450 MB limit (peak 0.4 GB), a little slower.
+Results then differ by float16 rounding (tested level on the 13 areas). A limit below what
+the model needs fails with a clear message.
 
 **Slow:** use a GPU if you have one; otherwise tick **Process only an area** to run on part
-of the image, and **Fast mode** (about 18 instead of 30 minutes per km² on a 24-thread CPU).
+of the image, and **Fast mode** (about 12 instead of 22 minutes per km² on a 24-thread CPU).
 
 **"Process only an area" needs georeferenced rasters:** the area is given in map
 coordinates, so images without georeferencing (e.g. plain JPEGs) can only be processed whole.

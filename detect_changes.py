@@ -217,6 +217,9 @@ def build_parser():
     parser.add_argument("--overlap", type=int, default=None,
                         help="Tile overlap in pixels (default 0, or the preset's)")
     parser.add_argument("--device", default="auto")
+    parser.add_argument("--threads", type=int, default=None, metavar="N",
+                        help="CPU threads for the model on the CPU (default: one fewer than the "
+                             "CPU has, when PyTorch would otherwise take every one)")
     parser.add_argument("--max-vram", type=int, default=None, metavar="MB",
                         help="Use at most this much GPU memory (MB, plus ~0.3 GB for the "
                              "CUDA runtime itself); for small or shared GPUs")
@@ -380,6 +383,17 @@ def resolve_threshold(args, preset):
         args.tta_gate = 0.0
 
 
+def cpu_threads(requested=None):
+    """Threads for the model on the CPU. PyTorch takes every logical CPU where it sees no
+    hyperthreading; one busy core (the tile preparation, QGIS, another program) then
+    stalls all the others at each step: on a 24-thread machine with one other busy
+    process, 23 threads ran a tile in 0.76 s against 1.15 s with 24. Same results."""
+    if requested:
+        return max(1, requested)
+    n, total = torch.get_num_threads(), os.cpu_count() or 1
+    return max(1, total - 1) if n >= total and total > 2 else n
+
+
 def infer_probability(args, model, cs_model, before_img, after_img, factor, device,
                       progress_fn=None):
     """Binary mode: change probability at the input resolution."""
@@ -436,6 +450,10 @@ def main():
     else:
         device = torch.device(args.device)
     _emit({"type": "device", "device": str(device)})
+    if device.type == "cpu":
+        n = cpu_threads(args.threads)
+        torch.set_num_threads(n)
+        _log(f"CPU threads: {n}")
     if args.max_vram and device.type == "cuda":
         from uchange_qgis_plugin.tiling import set_vram_limit
         set_vram_limit(args.max_vram, device)
@@ -577,9 +595,9 @@ def main():
             _log(f"Pixel size: {gsd:.2f} m")
             km2 = w * h * gsd * gsd / 1e6
             if device.type == "cpu" and km2 >= 0.1:
-                # measured on a 24-thread CPU: ~30 min per km2, ~18 with --fast
-                _log(f"Running on the CPU: expect roughly {30 * km2:.0f} minutes for {km2:.2f} km2"
-                     + ("" if not args.tta else f" (about {18 * km2:.0f} with --fast)")
+                # measured on a 24-thread CPU: ~22 min per km2, ~12 with --fast
+                _log(f"Running on the CPU: expect roughly {22 * km2:.0f} minutes for {km2:.2f} km2"
+                     + ("" if not args.tta else f" (about {12 * km2:.0f} with --fast)")
                      + "; a GPU needs under a minute per km2."
                      + ("" if args.extent else " Try a small area first (--extent)."))
         if gsd_note:
@@ -726,6 +744,8 @@ def main():
             low = min(bf["low"], redraw)
             min_score = bf["min_score"] if args.filter_min_score is None else args.filter_min_score
             orphan_peak = None if args.no_filter_orphans else bf.get("orphan_peak")
+            if device.type == "cuda":
+                torch.cuda.empty_cache()        # the inference's cached blocks, for the filter
             t1 = time.time()
             _log(f"False-alarm filter: changes at {low:.2f}, keep if judged real >= {min_score:.2f}, "
                  f"outlines at {redraw:.2f}...")
@@ -736,7 +756,8 @@ def main():
                 progress_fn=lambda i, n: _progress(85 + int(10 * i / n)))
             weak = (f", and {fstats['orphans_kept']} of {fstats['orphans']} weaker ones"
                     if orphan_peak else "")
-            _log(f"  kept {fstats['kept']} of {fstats['blobs']} changes{weak} ({time.time() - t1:.1f}s)")
+            _log(f"  kept {fstats['kept']} of {fstats['blobs']} changes{weak} ({time.time() - t1:.1f}s; "
+                 f"{fstats['finished']} close enough to the cut to need all four rotations)")
             args.threshold = redraw
             scores = {"prob": prob_map, "filter_labels": fstats["labels"],
                       "filter_real": fstats["real_prob"]}

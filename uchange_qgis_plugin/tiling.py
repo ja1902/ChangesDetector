@@ -136,7 +136,7 @@ def gpu_budget(device):
     return max(0, free)
 
 
-def _estimate_batch_size(device, tile_size, scd_mode=False, model=None):
+def _estimate_batch_size(device, tile_size, scd_mode=False, model=None, chunk=None):
     if device.type != "cuda":
         return 4
 
@@ -144,10 +144,13 @@ def _estimate_batch_size(device, tile_size, scd_mode=False, model=None):
 
     if is_vit:
         # Measured on the DINOv2 ViT-B change model in float16: ~100 MB per
-        # 252 px tile, nearly all of it decoder feature maps (they scale with
-        # the tile's area; attention runs in memory-efficient kernels).
-        bytes_per_tile = 100 * 1024**2 * (tile_size / 252.0) ** 2 * 1.25
-        model_overhead = 64 * 1024**2
+        # 252 px tile in the decoder (its feature maps scale with the tile's
+        # area; attention runs in memory-efficient kernels), ~5 MB in the
+        # backbone; with `chunk`, the decoder takes that many tiles at a time.
+        area = (tile_size / 252.0) ** 2
+        decoder_tile = 100 * 1024**2 * area * 1.25
+        bytes_per_tile = 5 * 1024**2 * area * 1.25 + (0 if chunk else decoder_tile)
+        model_overhead = 64 * 1024**2 + (chunk * decoder_tile if chunk else 0)
     else:
         bytes_per_tile = tile_size * tile_size * 3 * 4
         model_overhead = (2.5 if scd_mode else 1.5) * 1024**3
@@ -157,6 +160,40 @@ def _estimate_batch_size(device, tile_size, scd_mode=False, model=None):
     available = max(0, gpu_budget(device) - model_overhead)
     batch = max(1, int(available / bytes_per_tile))
     return min(batch, MAX_BATCH)
+
+
+def _plan_batch(device, tile_size, model):
+    """(batch size, decoder chunk). A DINOv2 model on a GPU too small (or too limited by
+    --max-vram) for MAX_BATCH tiles keeps MAX_BATCH and decodes them a few at a time
+    (DINOv2ChangeDetector.decoder_chunk): about 0.25 GB instead of 0.8 GB for 8 tiles, at
+    ~3% of the speed, against 10-20% for smaller batches. Where MAX_BATCH fits, nothing
+    changes. Smaller batches and decoder chunks change the float16 results by a rounding
+    step (validated on the 13 squares of our dataset: work_dirs/exp_speed)."""
+    batch = _estimate_batch_size(device, tile_size, model=model)
+    if batch >= MAX_BATCH or not hasattr(model, "decoder_chunk"):
+        return batch, None
+    for chunk in (4, 2, 1):
+        b = _estimate_batch_size(device, tile_size, model=model, chunk=chunk)
+        if b >= MAX_BATCH or chunk == 1:
+            return b, chunk
+    return batch, None
+
+
+class _DecoderChunk:
+    """Sets model.decoder_chunk for the inference, restores it afterwards."""
+
+    def __init__(self, model, chunk):
+        self.model, self.chunk = model, chunk
+
+    def __enter__(self):
+        if self.chunk is not None:
+            self.old = self.model.decoder_chunk
+            self.model.decoder_chunk = self.chunk
+        return self
+
+    def __exit__(self, *exc):
+        if self.chunk is not None:
+            self.model.decoder_chunk = self.old
 
 
 def _prepare_batch(tiles_slice, pre_img, post_img, tile_size, grayscale=False,
@@ -385,7 +422,7 @@ def run_scaled_inference(model, pre_img, post_img, factor, tile_size, overlap, d
 
     rows = _tile_rows(generate_tiles(H, W, tile_size, overlap))
     total = sum(len(xs) for _, _, xs in rows)
-    batch_size = _estimate_batch_size(device, tile_size, model=model)
+    batch_size, chunk = _plan_batch(device, tile_size, model)
 
     out = np.empty((h, w), dtype=np.float32)
     acc = np.zeros((0, W), dtype=np.float32)        # working rows top .. top+len
@@ -399,7 +436,7 @@ def run_scaled_inference(model, pre_img, post_img, factor, tile_size, overlap, d
             return img[y0:y1]
         return resample_rows(img, (h, w), (H, W), y0, y1, Image.BILINEAR)
 
-    with ThreadPoolExecutor(max_workers=1) as executor:
+    with ThreadPoolExecutor(max_workers=1) as executor, _DecoderChunk(model, chunk):
         for i, (y0, y1, xs) in enumerate(rows):
             pre_band = working_rows(pre_img, y0, y1)
             post_band = working_rows(post_img, y0, y1)
