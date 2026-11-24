@@ -21,6 +21,7 @@ import sys
 import os
 import json
 import argparse
+import contextlib
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -217,6 +218,9 @@ def build_parser():
     parser.add_argument("--overlap", type=int, default=None,
                         help="Tile overlap in pixels (default 0, or the preset's)")
     parser.add_argument("--device", default="auto")
+    parser.add_argument("--cpu-backend", choices=["auto", "openvino", "torch"], default="auto",
+                        help="On the CPU: run the DINOv2 passes in OpenVINO (auto: when installed; "
+                             "about 1.2-1.4x faster, same results to float32 rounding) or PyTorch")
     parser.add_argument("--threads", type=int, default=None, metavar="N",
                         help="CPU threads for the model on the CPU (default: one fewer than the "
                              "CPU has, when PyTorch would otherwise take every one)")
@@ -458,6 +462,16 @@ def main():
         n = cpu_threads(args.threads)
         torch.set_num_threads(n)
         _log(f"CPU threads: {n}")
+    use_ov = False
+    if device.type == "cpu" and args.cpu_backend != "torch":
+        from uchange_qgis_plugin import openvino_cpu
+        ov_version = openvino_cpu.version()
+        if ov_version is None and args.cpu_backend == "openvino":
+            _emit({"type": "error", "message": "OpenVINO is not installed (pip install openvino)."})
+            sys.exit(1)
+        use_ov = ov_version is not None
+        _log(f"CPU backend: OpenVINO {ov_version}" if use_ov else
+             "CPU backend: PyTorch (installing OpenVINO makes CPU runs about 1.2-1.4x faster)")
     if args.max_vram and device.type == "cuda":
         from uchange_qgis_plugin.tiling import set_vram_limit
         set_vram_limit(args.max_vram, device)
@@ -625,8 +639,12 @@ def main():
         _log("Histogram matching: per-tile (after → before)")
 
     try:
-        result = infer_probability(args, model, cs_model, before_img, after_img, factor,
-                                   device, progress_fn)
+        backend = (openvino_cpu.change_model(model, weights_path, args.tile_size,
+                                             torch.get_num_threads(), _log)
+                   if use_ov else contextlib.nullcontext())
+        with backend:
+            result = infer_probability(args, model, cs_model, before_img, after_img, factor,
+                                       device, progress_fn)
         del cs_model
         if args.label_free:
             from uchange_qgis_plugin.labelfree import label_free_z, nudge
@@ -695,11 +713,14 @@ def main():
         t1 = time.time()
         _log(f"False-alarm filter: changes at {low:.2f}, keep if judged real >= {min_score:.2f}, "
              f"outlines at {redraw:.2f}...")
+        tokens_fn = (openvino_cpu.filter_tokens(model.backbone, weights_path, flt["size"],
+                                                flt["layers"], torch.get_num_threads(), _log)
+                     if use_ov else None)
         binary_mask, fstats = filter_mask(
             prob_map, before_img, after_img, model.backbone,
             gsd or pixel_size_m(before_geo or after_geo) or 0.5, flt, device,
             low=low, redraw=redraw, min_score=min_score, orphan_peak=orphan_peak,
-            progress_fn=lambda i, n: _progress(85 + int(10 * i / n)))
+            progress_fn=lambda i, n: _progress(85 + int(10 * i / n)), tokens_fn=tokens_fn)
         weak = (f", and {fstats['orphans_kept']} of {fstats['orphans']} weaker ones"
                 if orphan_peak else "")
         _log(f"  kept {fstats['kept']} of {fstats['blobs']} changes{weak} ({time.time() - t1:.1f}s; "

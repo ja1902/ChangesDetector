@@ -64,27 +64,35 @@ def _crop(img, y0, y1, x0, x1):
     return np.pad(c, pad, mode="edge") if any(p for pp in pad for p in pp) else c
 
 
+def backbone_tokens(bb, x, size, layers):
+    """Patch tokens (n, g, g, C) of the crops x (n, 3, size, size) at the given blocks."""
+    g = size // 14
+    x = bb.patch_embed(x)
+    pe = bb._interpolate_pos_embed(x.shape[1])
+    x = x + pe[:, 1:]
+    x = torch.cat([(bb.cls_token + pe[:, :1]).expand(x.shape[0], -1, -1), x], 1)
+    out = []
+    for i, blk in enumerate(bb.blocks):
+        x = blk(x)
+        if i in layers:
+            out.append(x[:, 1:].reshape(x.shape[0], g, g, -1))
+        if i >= max(layers):
+            break
+    return out
+
+
 class _Features:
-    def __init__(self, backbone, device, size, layers):
+    def __init__(self, backbone, device, size, layers, tokens_fn=None):
         self.bb, self.dev, self.size, self.layers = backbone, device, int(size), tuple(int(l) for l in layers)
         self.dtype = next(backbone.parameters()).dtype
         self.max_items = _CROPS // 2          # (blob, rotation) items per DINOv2 pass
+        self.tokens_fn = tokens_fn            # the same pass in another runtime (openvino_cpu)
 
     @torch.no_grad()
     def _tokens(self, x):
-        bb, g = self.bb, self.size // 14
-        x = bb.patch_embed(x)
-        pe = bb._interpolate_pos_embed(x.shape[1])
-        x = x + pe[:, 1:]
-        x = torch.cat([(bb.cls_token + pe[:, :1]).expand(x.shape[0], -1, -1), x], 1)
-        out = []
-        for i, blk in enumerate(bb.blocks):
-            x = blk(x)
-            if i in self.layers:
-                out.append(x[:, 1:].reshape(x.shape[0], g, g, -1))
-            if i >= max(self.layers):
-                break
-        return out
+        if self.tokens_fn is not None:
+            return self.tokens_fn(x)
+        return backbone_tokens(self.bb, x, self.size, self.layers)
 
     def _tokens_fitting(self, xs):
         """_tokens of the crops xs (k, 2, 3, S, S), in smaller passes if the GPU runs out
@@ -305,7 +313,7 @@ class _Pixels:
 
 def filter_mask(prob, before, after, backbone, gsd, flt, device, low=0.6, redraw=0.83,
                 min_score=0.46, orphan_peak=None, progress_fn=None, cancel_fn=None,
-                cascade_margin=CASCADE_MARGIN):
+                cascade_margin=CASCADE_MARGIN, tokens_fn=None):
     """Binary mask (uint8) of the kept, redrawn blobs, and a stats dict.
 
     prob: change probabilities (H, W) at the images' resolution; before, after: the
@@ -314,7 +322,8 @@ def filter_mask(prob, before, after, backbone, gsd, flt, device, low=0.6, redraw
     classifier's probability that it is real is at least this; orphan_peak: also judge
     the weaker changes peaking at this level outside the blobs (None = off);
     cascade_margin: judge each candidate on one rotation first and finish only those whose
-    quick score is within this of the cut (None = all four rotations for every one).
+    quick score is within this of the cut (None = all four rotations for every one);
+    tokens_fn: runs the backbone's pass instead of PyTorch (openvino_cpu.filter_tokens).
 
     stats: "blobs" (judged), "kept", "orphans" (judged), "orphans_kept", and for
     per-polygon scores "labels" (int32 (H, W), the blob or orphan each pixel belongs to,
@@ -337,7 +346,7 @@ def filter_mask(prob, before, after, backbone, gsd, flt, device, low=0.6, redraw
     pix = _Pixels(units)
     p90 = [np.percentile(prob[ys, xs], 90) for ys, xs in pix]
     cut = _logit(np.array(min_score))
-    fx = _Features(backbone, device, flt["size"], flt["layers"])
+    fx = _Features(backbone, device, flt["size"], flt["layers"], tokens_fn)
     nu = len(units)
     cascade = cascade_margin is not None
     # progress in (blob, rotation) items; until the quick look is done, assume every

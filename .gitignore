@@ -25,3 +25,6 @@ logs/
 
 # Local test artefacts
 .pytest_cache/
+
+# Models converted for OpenVINO on the CPU (uchange_qgis_plugin/openvino_cpu.py)
+openvino_cache/

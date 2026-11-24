@@ -66,6 +66,13 @@ pip install -r "%SCRIPT_DIR%\requirements.txt"
 echo Installing AROSICS (co-registration)...
 pip install arosics geoarray py_tools_ds shapely scikit-image
 
+:: OpenVINO runs the model about 1.2-1.4x faster on the CPU (optional: without it the CPU
+:: uses PyTorch). Keep the NumPy installed above.
+echo Installing OpenVINO (faster CPU runs, optional)...
+for /f "delims=" %%v in ('python -c "import numpy; print(numpy.__version__)"') do set "NUMPY_NOW=%%v"
+pip install openvino "numpy==!NUMPY_NOW!"
+if errorlevel 1 echo WARNING: OpenVINO did not install; CPU runs use PyTorch (same results, slower).
+
 :: -----------------------------------------------
 :: 5. Model weights: Meta's DINOv2 backbone + the trained parts in weights\
 :: -----------------------------------------------

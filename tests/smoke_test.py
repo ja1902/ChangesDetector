@@ -164,6 +164,43 @@ def t_batch(pair):
     assert all(np.allclose(t, a, atol=1e-4) for t, a in zip(together, alone))
 
 
+def t_openvino(tmp, pair):
+    from uchange_qgis_plugin import openvino_cpu
+    if openvino_cpu.version() is None:
+        print("SKIP  openvino: not installed")
+        return
+    _t_openvino(tmp, pair)
+
+
+@check("openvino: the CPU backend gives PyTorch's change probabilities and filter features")
+def _t_openvino(tmp, pair):
+    import torch
+    import detect_changes as dc
+    from uchange_qgis_plugin import openvino_cpu
+    from uchange_qgis_plugin.falsealarm_filter import _Features
+    from uchange_qgis_plugin.model_bridge import build_model
+    cpu, weights = torch.device("cpu"), str(ROOT / "dinov2_vitb14_finetuned.pth")
+    m, _ = build_model(weights, cpu, model_type="dinov2")
+    m.decoder_chunk = 1
+    x = torch.from_numpy(np.random.default_rng(0).standard_normal((3, 2, 3, 252, 252), dtype=np.float32))
+    with torch.inference_mode():
+        ref = torch.softmax(m(x[:, 0], x[:, 1]), 1)[:, 1]
+        with openvino_cpu.change_model(m, weights, 252, torch.get_num_threads(), print) as used:
+            assert used, "OpenVINO did not load the model"
+            out = torch.softmax(m(x[:, 0], x[:, 1]), 1)[:, 1]
+    assert "forward" not in m.__dict__ and not m.training, "the model was not restored"
+    assert (out - ref).abs().max() < 1e-5, f"probabilities differ by {(out - ref).abs().max():.1e}"
+    A, _ = dc.read_image(str(pair / "before.tif"))
+    B, _ = dc.read_image(str(pair / "after.tif"))
+    pix = [tuple(np.mgrid[y:y + 20, x:x + 30].reshape(2, -1)) for y, x in ((40, 50), (200, 210))]
+    fn = openvino_cpu.filter_tokens(m.backbone, weights, 280, (8, 11), torch.get_num_threads(), print)
+    assert fn is not None, "OpenVINO did not load the filter's backbone"
+    ov = _Features(m.backbone, cpu, 280, (8, 11), fn).blobs(A, B, pix, GSD)
+    pt = _Features(m.backbone, cpu, 280, (8, 11)).blobs(A, B, pix, GSD)
+    diff = max(float(np.abs(o - p).max()) for o, p in zip(ov, pt))
+    assert diff < 1e-3, f"filter features differ by {diff:.1e}"
+
+
 # ---------------------------------------------------------------- detect_changes.py end to end
 
 @check("CLI: default run writes one feature per change with its scores")
@@ -214,6 +251,7 @@ def main():
         t_polygons(tmp)
         t_crop(tmp, pair)
         t_batch(pair)
+        t_openvino(tmp, pair)
         if not quick:
             t_cli_default(pair)
             t_cli_extent(pair)

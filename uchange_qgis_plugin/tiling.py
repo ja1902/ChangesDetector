@@ -165,7 +165,13 @@ def _plan_batch(device, tile_size, model):
     (DINOv2ChangeDetector.decoder_chunk): about 0.25 GB instead of 0.8 GB for 8 tiles, at
     ~3% of the speed, against 10-20% for smaller batches. Where MAX_BATCH fits, nothing
     changes. Smaller batches and decoder chunks change the float16 results by a rounding
-    step (validated on the 13 squares of our dataset: work_dirs/exp_speed)."""
+    step (validated on the 13 squares of our dataset: work_dirs/exp_speed).
+    On the CPU the decoder always takes one tile at a time: a batch of 4 tiles then runs in
+    2.4 s against 3.1 s whole (its feature maps stay in the CPU caches), and the test
+    pair's GeoPackage is byte for byte the same."""
+    if device.type != "cuda":
+        return _estimate_batch_size(device, tile_size, model=model), (
+            1 if hasattr(model, "decoder_chunk") else None)
     batch = _estimate_batch_size(device, tile_size, model=model)
     if batch >= MAX_BATCH or not hasattr(model, "decoder_chunk"):
         return batch, None

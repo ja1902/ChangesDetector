@@ -156,6 +156,14 @@ if ! python -c "import arosics" 2>/dev/null; then
     { python -c "import arosics" 2>&1 || true; } | tail -1 | sed 's/^/         /'
 fi
 
+# OpenVINO runs the model about 1.2-1.4x faster on the CPU (optional: without it the CPU
+# uses PyTorch). Keep the NumPy installed above: GDAL's bindings were built against it.
+echo "Installing OpenVINO (faster CPU runs, optional)..."
+NUMPY_NOW=$(python -c "import numpy; print(numpy.__version__)")
+if ! pip install openvino "numpy==$NUMPY_NOW"; then
+    echo "WARNING: OpenVINO did not install; CPU runs use PyTorch (same results, slower)."
+fi
+
 # -----------------------------------------------
 # 5. Model weights: Meta's DINOv2 backbone + the trained parts in weights/
 # -----------------------------------------------

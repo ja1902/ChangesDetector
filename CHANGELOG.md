@@ -37,8 +37,18 @@ and after, the two versions run in turn:
 - **CPU: one core left free**: PyTorch used every logical CPU, so one busy core (the tile
   preparation, QGIS, another program) held all the others up: on a 24-thread machine a tile
   took 0.76 s with 23 threads against 1.15 s with 24. The default is now one fewer than the
-  CPU has (where there is no hyperthreading to leave room); `--threads N` sets it. The CPU
-  time estimates in the dialog and the CLI are now ~22 minutes per km2, ~12 with Fast mode.
+  CPU has (where there is no hyperthreading to leave room); `--threads N` sets it. The
+  decoder also takes one tile at a time on the CPU (2.4 s per 4 tiles against 3.1 s: its
+  feature maps stay in the CPU caches). The CPU time estimates in the dialog and the CLI are
+  now ~22 minutes per km2, ~12 with Fast mode.
+- **CPU: OpenVINO** (optional; the installers now add it): on the CPU the change model and
+  the filter's backbone run in OpenVINO when it is installed. On a 500 m area the
+  GeoPackage is byte for byte PyTorch's; the run took 196-205 s against 220-222 s on the
+  24-thread CPU (x1.1); on a 6-core laptop CPU the change
+  model ran x1.46 faster and the filter's backbone x1.20. The first CPU run of a model
+  converts it (~20 s each for the model and the filter) into `openvino_cache/` beside the
+  model file (0.7 GB); peak memory is about 0.7 GB higher (2.9 against 2.2 GB on that
+  area). Without OpenVINO, or with `--cpu-backend torch`, the CPU runs PyTorch as before.
 - Smaller: the backbone's positional embedding is resized once per tile size instead of in
   every pass, and the filter prepares its next crops while the GPU works.
 - **Removed: the old ChangerEx and SCD UPerNet models.** The CLI no longer runs them

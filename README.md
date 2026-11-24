@@ -156,6 +156,7 @@ Main options:
 | `--fast` | skip flip averaging |
 | `--device auto\|cpu\|gpu`, `--max-vram MB` | where to run, and a GPU memory limit |
 | `--threads N` | CPU threads (default: one fewer than the CPU has) |
+| `--cpu-backend auto\|openvino\|torch` | on the CPU, run the model in OpenVINO (default when installed: faster, same results) |
 | `--no-coreg`, `--max-shift 50` | co-registration |
 | `--target-gsd 0.5` | resample coarser imagery to this pixel size (0: off) |
 | `--threshold auto\|0.3` | change threshold (auto: the one each model was tested with) |
@@ -202,6 +203,11 @@ the model needs fails with a clear message.
 
 **Slow:** use a GPU if you have one; otherwise tick **Process only an area** to run on part
 of the image, and **Fast mode** (about 12 instead of 22 minutes per km² on a 24-thread CPU).
+On the CPU the model runs in OpenVINO, which the installer adds: 1.1-1.4x faster than
+PyTorch depending on the CPU (the log says "CPU backend: OpenVINO"). If it says PyTorch,
+`pip install openvino "numpy==<the installed version>"` in the plugin's environment adds it;
+keep NumPy as it is, since GDAL's bindings are built against it. The first CPU run of each
+model converts it for OpenVINO (about 40 s, 0.7 GB in `openvino_cache/` beside the model).
 
 **"Process only an area" needs georeferenced rasters:** the area is given in map
 coordinates, so images without georeferencing (e.g. plain JPEGs) can only be processed whole.
