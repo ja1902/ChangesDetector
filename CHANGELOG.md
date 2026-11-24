@@ -5,58 +5,42 @@ details and every result behind these choices are in [EXPERIMENTS.md](EXPERIMENT
 
 ## v0.10
 
-### Faster filter, small GPUs, faster on the CPU (v0.10.2)
+### Faster, lighter on GPU memory, faster on the CPU (v0.10.2)
 
-Same results as v0.10.1 wherever the GPU has room for 8 tiles, and on the CPU: on a test
-pair (1 km2 at 0.49 m) the GeoPackage is byte for byte the same (GPU: the whole pair; CPU,
-normal and Fast mode: a 500 m area of it). Measured on that pair, the same machine before
-and after, the two versions run in turn:
+Same results as v0.10.1: on a test pair the output is byte for byte the same, on the GPU
+and on the CPU. Speed on that pair (1 km² at 0.5 m):
 
 | | v0.10.1 | v0.10.2 |
 |---|---|---|
-| GPU, whole run | 67-68 s | 53-58 s |
-| of which the false-alarm filter | 28 s | 18-19 s |
-| CPU (24 threads), a 500 m area | 268-270 s | 187-206 s |
-| CPU with Fast mode, same area | 172 s | 110 s |
+| GPU, whole run | 68 s | 55 s |
+| of which the false-alarm filter | 28 s | 18 s |
+| CPU, a 500 m area | 270 s | 190 s |
+| CPU with Fast mode, same area | 170 s | 110 s |
 
-- **The false-alarm filter judges in two steps**: every candidate is first scored on one of
-  its four rotations, and the other three are added only where that quick score comes
-  within 1.75 (logit) of the "keep if real" cut. On 15 test areas (3,772 candidates, both
-  filters) the quick score was never more than 1.21 below the full one, so the candidates it
-  rules out are far from being kept, and those it finishes get exactly the score they got
-  before. At the default "keep if real" this skips about 40% of the filter's work; at a much
-  lower setting nearly every candidate is finished, as before.
-- **Small or shared GPUs**: where 8 tiles do not fit in the free memory (or under the "GPU
-  memory limit"), the model still runs 8 tiles at a time but decodes them a few at a time
-  (about 0.25 GB instead of 0.8 GB), instead of dropping to smaller, slower batches; and the
-  filter splits its passes if the GPU runs out of memory. The whole run now works under a
-  450 MB limit (peak 0.4 GB); v0.10.1 ran out of memory in the filter at 600 MB. On the 13
-  areas of the custom dataset this decoding is level with the usual one (curve mean 66.1%
-  both, +0.1 [-0.1, +0.2]), the same kind of float16 rounding difference smaller batches
-  already gave.
-- **CPU: one core left free**: PyTorch used every logical CPU, so one busy core (the tile
-  preparation, QGIS, another program) held all the others up: on a 24-thread machine a tile
-  took 0.76 s with 23 threads against 1.15 s with 24. The default is now one fewer than the
-  CPU has (where there is no hyperthreading to leave room); `--threads N` sets it. The
-  decoder also takes one tile at a time on the CPU (2.4 s per 4 tiles against 3.1 s: its
-  feature maps stay in the CPU caches). The CPU time estimates in the dialog and the CLI are
-  now for a typical 6-8 core CPU: ~35 minutes per km2, ~20 with Fast mode (a 24-thread one
-  takes ~20 and ~11).
-- **CPU: OpenVINO** (optional; the installers now add it): on the CPU the change model and
-  the filter's backbone run in OpenVINO when it is installed. On a 500 m area the
-  GeoPackage is byte for byte PyTorch's; the run took 196-205 s against 220-222 s on the
-  24-thread CPU (x1.1); on a 6-core laptop CPU the change
-  model ran x1.46 faster and the filter's backbone x1.20. The first CPU run of a model
-  converts it (~20 s each for the model and the filter) into `openvino_cache/` beside the
-  model file (0.7 GB); peak memory is about 0.7 GB higher (2.9 against 2.2 GB on that
-  area). Without OpenVINO, or with `--cpu-backend torch`, the CPU runs PyTorch as before.
-- Smaller: the backbone's positional embedding is resized once per tile size instead of in
-  every pass, and the filter prepares its next crops while the GPU works.
-- **Removed: the old ChangerEx and SCD UPerNet models.** The CLI no longer runs them
-  (`--model-type opencd` / `opencd_scd`); semantic mode is always the labelled from -> to
-  change, also with custom weights. The OpenCD fine-tuning kit that went with them
-  (`open-cd-main/`, `finetune.py`, `FINETUNING.md`) and an unused training script are gone
-  too: `finetune_dinov2.py` finetunes the current models. v0.10.1 still has all of it.
+- **Faster false-alarm filter**: each candidate is first judged on one of its four
+  rotations, and the other three are added only for candidates close to the "keep if real"
+  cut. Those get exactly the score they got before; the others are far from being kept.
+  About 40% less filter work at the default setting.
+- **Small GPUs**: when 8 tiles do not fit in the GPU's free memory (or under the "GPU
+  memory limit"), the model decodes them a few at a time instead of switching to smaller,
+  slower batches, and the filter splits its work if memory runs out. A whole run now fits
+  in about 0.4 GB of GPU memory (v0.10.1 failed under a 600 MB limit). Results then differ
+  only by float16 rounding, tested level on the held-out areas.
+- **Faster on the CPU**: the model uses one thread fewer than the CPU has, so a single
+  busy core no longer holds all the others up (`--threads N` sets it), and its decoder
+  takes one tile at a time, which keeps its data in the CPU caches.
+- **OpenVINO on the CPU** (optional; the installers add it): when it is installed, the
+  model and the filter run in OpenVINO on the CPU, about 1.1-1.4x faster than PyTorch
+  depending on the CPU, with the same results. The first CPU run of each model converts it
+  (about 40 s, 0.7 GB in `openvino_cache/` beside the model file), and a run uses about
+  0.7 GB more memory. `--cpu-backend torch` turns it off.
+- **CPU time estimates** in the dialog and the CLI are now for a typical laptop or
+  desktop: about 35 minutes per km², 20 with Fast mode.
+- **Removed: the old ChangerEx and SCD UPerNet models**, which the CLI could still run
+  (`--model-type opencd` / `opencd_scd`), and the OpenCD fine-tuning kit that went with them
+  (`open-cd-main/`, `finetune.py`, `FINETUNING.md`). Semantic mode is always the labelled
+  from -> to change; `finetune_dinov2.py` finetunes the current models. v0.10.1 still has
+  all of it.
 
 ### Process only an area, one feature per change (v0.10.1)
 
