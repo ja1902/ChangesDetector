@@ -357,9 +357,6 @@ class MultiLayerChangeDecoder(nn.Module):
         # Stage 2: 148x148 → 2x (296x296)
         self.upsample_blocks = nn.ModuleList()
         for i in range(3):
-            in_ch = hidden_dim * 2 if i > 0 else hidden_dim
-            # After concat with skip from next layer: hidden_dim + hidden_dim
-            fuse_in = hidden_dim + hidden_dim
             self.upsample_blocks.append(nn.Sequential(
                 nn.ConvTranspose2d(hidden_dim, hidden_dim, kernel_size=2, stride=2),
                 nn.BatchNorm2d(hidden_dim),

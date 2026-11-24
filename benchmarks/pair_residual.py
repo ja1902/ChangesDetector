@@ -20,8 +20,6 @@ match over its 3x3 neighbours, for misregistration and off-nadir lean.
     python benchmarks/pair_residual.py --small --save-png out/  # quick look, writes maps
 """
 import argparse
-import json
-import os
 import sys
 import time
 from pathlib import Path

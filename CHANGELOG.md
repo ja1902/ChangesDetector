@@ -41,6 +41,11 @@ and after, the two versions run in turn:
   time estimates in the dialog and the CLI are now ~22 minutes per km2, ~12 with Fast mode.
 - Smaller: the backbone's positional embedding is resized once per tile size instead of in
   every pass, and the filter prepares its next crops while the GPU works.
+- **Removed: the old ChangerEx and SCD UPerNet models.** The CLI no longer runs them
+  (`--model-type opencd` / `opencd_scd`); semantic mode is always the labelled from -> to
+  change, also with custom weights. The OpenCD fine-tuning kit that went with them
+  (`open-cd-main/`, `finetune.py`, `FINETUNING.md`) and an unused training script are gone
+  too: `finetune_dinov2.py` finetunes the current models. v0.10.1 still has all of it.
 
 ### Process only an area, one feature per change (v0.10.1)
 

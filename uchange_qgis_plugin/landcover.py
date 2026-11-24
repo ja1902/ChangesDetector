@@ -4,7 +4,7 @@ A small head reads the same four backbone layers as the change decoder, so
 one backbone gives the change map and the land cover of each date. Trained on
 OpenEarthMap (44 countries) plus SECOND; on unseen French imagery (HRSCD) it
 named both the before and after class right on 50% of changed pixels, against
-40% for the older SCD UPerNet (research/RESULTS_2026-09.md, E9).
+40% for the older SCD UPerNet (CHANGELOG.md, labelled change).
 
 Each change blob gets one label per date: the majority class inside it.
 """

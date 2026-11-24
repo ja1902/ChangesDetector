@@ -57,37 +57,6 @@ def bands_to_rgb8(bands):
     return out
 
 
-def read_raster(source_path):
-    """Read a raster file and return image data with georeferencing info.
-
-    Returns:
-        image: numpy array (H, W, 3) uint8 RGB
-        geotransform: 6-element GDAL geotransform tuple
-        projection_wkt: WKT string of the spatial reference
-    """
-    ds = gdal.Open(source_path, gdal.GA_ReadOnly)
-    if ds is None:
-        raise RuntimeError(f"Cannot open raster: {source_path}")
-
-    band_count = ds.RasterCount
-    if band_count < 3:
-        raise ValueError(
-            f"Raster must have at least 3 bands (RGB), got {band_count}"
-        )
-
-    bands = []
-    for i in range(1, 4):
-        band = read_band(ds.GetRasterBand(i))
-        bands.append(band)
-
-    image = bands_to_rgb8(bands)
-    geotransform = ds.GetGeoTransform()
-    projection_wkt = ds.GetProjection()
-
-    ds = None
-    return image, geotransform, projection_wkt
-
-
 def _raster_bounds(ds):
     gt = ds.GetGeoTransform()
     xs = (gt[0], gt[0] + gt[1] * ds.RasterXSize)
@@ -167,13 +136,6 @@ def _apply_style(geom, style, pixel_w):
     else:
         simplified = geom.Simplify(pixel_w * 2)
         return simplified if simplified and not simplified.IsEmpty() else geom
-
-
-def save_mask_png(binary_mask, output_path):
-    """Save binary mask as a grayscale PNG (255=change, 0=no-change)."""
-    import cv2
-    cv2.imwrite(output_path, (binary_mask * 255).astype(np.uint8),
-                [cv2.IMWRITE_PNG_COMPRESSION, 1])
 
 
 def save_semantic_geotiff(class_map, geotransform, projection_wkt, output_path,

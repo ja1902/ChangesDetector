@@ -3,8 +3,6 @@ import math
 import numpy as np
 from concurrent.futures import ThreadPoolExecutor
 
-from .model_registry import SCD_OUTPUT_TO_SECOND
-
 # LEVIR-CD change prior used for logit adjustment (see model_registry.PRESETS).
 PI_SOURCE = 0.0584
 
@@ -136,7 +134,7 @@ def gpu_budget(device):
     return max(0, free)
 
 
-def _estimate_batch_size(device, tile_size, scd_mode=False, model=None, chunk=None):
+def _estimate_batch_size(device, tile_size, model=None, chunk=None):
     if device.type != "cuda":
         return 4
 
@@ -153,9 +151,8 @@ def _estimate_batch_size(device, tile_size, scd_mode=False, model=None, chunk=No
         model_overhead = 64 * 1024**2 + (chunk * decoder_tile if chunk else 0)
     else:
         bytes_per_tile = tile_size * tile_size * 3 * 4
-        model_overhead = (2.5 if scd_mode else 1.5) * 1024**3
-        activation_multiplier = 16 if scd_mode else 12
-        bytes_per_tile *= activation_multiplier
+        model_overhead = 1.5 * 1024**3
+        bytes_per_tile *= 12
 
     available = max(0, gpu_budget(device) - model_overhead)
     batch = max(1, int(available / bytes_per_tile))
@@ -273,12 +270,6 @@ def _run_batch(model, pre_batch, post_batch, device, tta=False, logit_adjust=Fal
     with torch.inference_mode(), torch.amp.autocast("cuda", enabled=use_amp, dtype=amp_dtype or torch.float32):
         output = model(pre, post)
 
-        if isinstance(output, dict):
-            binary_probs = torch.softmax(output['seg_logits'].float(), dim=1)[:, 1].cpu().numpy()
-            sem_from = output['seg_logits_from'].float().argmax(dim=1).cpu().numpy()
-            sem_to = output['seg_logits_to'].float().argmax(dim=1).cpu().numpy()
-            return {'binary_probs': binary_probs, 'semantic_from': sem_from, 'semantic_to': sem_to}
-
         if tta and tta_gate is None:
             # Average the logits over the four flips (the evaluated pipeline).
             output = _flip_average(model, pre, post, output.float())
@@ -298,22 +289,15 @@ def run_tiled_inference(model, pre_img, post_img, tile_size, overlap, device,
                         progress_fn=None, cancel_fn=None, grayscale=False,
                         hist_match=False, tta=False, logit_adjust=False, tta_gate=None):
     h, w = pre_img.shape[:2]
-    scd_mode = getattr(model, 'is_scd', False)
 
     tiles = list(generate_tiles(h, w, tile_size, overlap))
     total = len(tiles)
 
-    batch_size = _estimate_batch_size(device, tile_size, scd_mode=scd_mode, model=model)
+    batch_size = _estimate_batch_size(device, tile_size, model=model)
 
     while True:
         prob_map = np.zeros((h, w), dtype=np.float32)
         count_map = np.zeros((h, w), dtype=np.float32)
-
-        if scd_mode:
-            num_classes = 6
-            votes_from = np.zeros((num_classes, h, w), dtype=np.float32)
-            votes_to = np.zeros((num_classes, h, w), dtype=np.float32)
-
         oom = False
 
         with ThreadPoolExecutor(max_workers=1) as executor:
@@ -344,19 +328,9 @@ def run_tiled_inference(model, pre_img, post_img, tile_size, overlap, device,
                     oom = True
                     break
 
-                if scd_mode:
-                    for j, (y0, x0, y1, x1, th, tw) in enumerate(tile_meta):
-                        prob_map[y0:y1, x0:x1] += result['binary_probs'][j, :th, :tw]
-                        count_map[y0:y1, x0:x1] += 1.0
-                        cls_from = result['semantic_from'][j, :th, :tw]
-                        cls_to = result['semantic_to'][j, :th, :tw]
-                        for c in range(num_classes):
-                            votes_from[c, y0:y1, x0:x1] += (cls_from == c).astype(np.float32)
-                            votes_to[c, y0:y1, x0:x1] += (cls_to == c).astype(np.float32)
-                else:
-                    for j, (y0, x0, y1, x1, th, tw) in enumerate(tile_meta):
-                        prob_map[y0:y1, x0:x1] += result[j, :th, :tw]
-                        count_map[y0:y1, x0:x1] += 1.0
+                for j, (y0, x0, y1, x1, th, tw) in enumerate(tile_meta):
+                    prob_map[y0:y1, x0:x1] += result[j, :th, :tw]
+                    count_map[y0:y1, x0:x1] += 1.0
 
                 done = min(start + batch_size, total)
                 if progress_fn:
@@ -367,18 +341,6 @@ def run_tiled_inference(model, pre_img, post_img, tile_size, overlap, device,
 
     count_map = np.maximum(count_map, 1.0)
     prob_map = (prob_map / count_map).astype(np.float32)
-
-    if scd_mode:
-        # Model output index -> 0-based SECOND class index (SECOND_SEMANTIC_CLASSES[1:]).
-        remap = np.array(SCD_OUTPUT_TO_SECOND, dtype=np.uint8)[1:] - 1
-        semantic_from = remap[votes_from.argmax(axis=0)]
-        semantic_to = remap[votes_to.argmax(axis=0)]
-        return {
-            'prob_map': prob_map,
-            'semantic_from': semantic_from,
-            'semantic_to': semantic_to,
-        }
-
     return prob_map
 
 

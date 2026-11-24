@@ -104,24 +104,6 @@ FINETUNED_WEIGHTS = "dinov2_vitb14_finetuned.pth"
 # model file a preset runs when no --weights is given (others: DEFAULT_WEIGHTS)
 PRESET_WEIGHTS = {"finetuned": FINETUNED_WEIGHTS, "finetuned_s2l": "dinov2_vitb14_finetuned_s2l.pth"}
 
-SECOND_SEMANTIC_CLASSES = (
-    'unchanged', 'water', 'ground',
-    'low vegetation', 'tree', 'building',
-    'sports field',
-)
-SECOND_SEMANTIC_PALETTE = (
-    (255, 255, 255), (0, 0, 255), (128, 128, 128),
-    (0, 128, 0), (0, 255, 0), (128, 0, 0),
-    (255, 0, 0),
-)
-
-# The SCD UPerNet's six semantic outputs are not in SECOND_SEMANTIC_CLASSES
-# order: measured on the SECOND test set, its output (index + 1) maps to the
-# class below (1 low vegetation, 3 tree, 4 water; the rest already match).
-# Versions before 0.7 skipped this and labelled those three classes wrongly.
-SCD_OUTPUT_TO_SECOND = (0, 3, 2, 4, 1, 5, 6)
-
-
 # Labelled change (type dinov2_lc): classes of landcover.LandCoverHead after
 # merging OpenEarthMap's developed space and road.
 LANDCOVER_CLASSES = (
@@ -149,14 +131,8 @@ def preset_threshold(preset, tta, label_free=None):
     return float(preset["threshold"])
 
 
-def is_scd_model(display_name):
-    """Models listed in semantic mode."""
-    entry = MODEL_REGISTRY.get(display_name)
-    return entry is not None and entry.get("type") in ("opencd_scd", "dinov2_lc")
-
-
 def is_labelled_model(display_name):
-    """Semantic models that write labelled polygons (GeoPackage)."""
+    """Models listed in semantic mode: they write labelled polygons (GeoPackage)."""
     entry = MODEL_REGISTRY.get(display_name)
     return entry is not None and entry.get("type") == "dinov2_lc"
 

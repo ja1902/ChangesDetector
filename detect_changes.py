@@ -252,8 +252,7 @@ def build_parser():
     parser.add_argument("--model-type", default=None,
                         help="Model type (default dinov2, or dinov2_lc with --mode semantic): dinov2, ensemble "
                              "(DINOv2 weights + Changen2 ChangeStar ViT-L, needs torchange), or "
-                             "dinov2_lc (DINOv2 change + land cover: labelled from -> to polygons); "
-                             "legacy: opencd (ChangerEx), opencd_scd (SCD UPerNet)")
+                             "dinov2_lc (DINOv2 change + land cover: labelled from -> to polygons)")
     parser.add_argument("--preset", default=None, choices=sorted(PRESETS),
                         help="Evaluated inference settings for a model (fills the options below)")
     parser.add_argument("--scale", type=float, default=None,
@@ -318,6 +317,11 @@ def resolve_settings(args):
         args.threshold = "auto" if args.preset else "0.5"
     if args.model_type is None:
         args.model_type = "dinov2_lc" if args.mode == "semantic" else "dinov2"
+    if args.model_type not in ("dinov2", "ensemble", "dinov2_lc"):
+        sys.exit(f"Unknown --model-type {args.model_type}: dinov2, ensemble or dinov2_lc "
+                 "(ChangerEx and the SCD UPerNet were removed in v0.10.2)")
+    if args.mode == "semantic" and args.model_type != "dinov2_lc":
+        sys.exit("--mode semantic runs --model-type dinov2_lc (DINOv2 change + land cover)")
     if args.weights is None:
         args.weights = PRESET_WEIGHTS.get(args.preset, DEFAULT_WEIGHTS)
 
@@ -470,19 +474,18 @@ def main():
         sys.exit(1)
     model_type = args.model_type
 
-    if model_type in ("dinov2", "ensemble", "dinov2_lc"):
-        patch_size = 14
-        adjusted = (args.tile_size // patch_size) * patch_size
-        if adjusted < patch_size:
-            adjusted = patch_size
-        if adjusted != args.tile_size:
-            _log(f"DINOv2: tile_size {args.tile_size} → {adjusted} (must be multiple of {patch_size})")
-            args.tile_size = adjusted
+    patch_size = 14
+    adjusted = (args.tile_size // patch_size) * patch_size
+    if adjusted < patch_size:
+        adjusted = patch_size
+    if adjusted != args.tile_size:
+        _log(f"DINOv2: tile_size {args.tile_size} → {adjusted} (must be multiple of {patch_size})")
+        args.tile_size = adjusted
 
     _log("Building model...")
     model, load_summary = build_model(
         weights_path, device,
-        model_type="dinov2" if model_type in ("ensemble", "dinov2_lc") else model_type)
+        model_type="dinov2")
     _log(load_summary)
     lc_head = None
     if labelled:
@@ -587,36 +590,32 @@ def main():
 
     # Resolution: the model's own scale, times an upsampling for coarse imagery.
     from uchange_qgis_plugin.resolution import working_factor
-    factor, gsd, gsd_note = (1.0, None, "")
-    if args.mode != "semantic":
-        factor, gsd, gsd_note = working_factor(before_geo or after_geo, args.target_gsd,
-                                               args.scale, before_img.shape)
-        if gsd:
-            _log(f"Pixel size: {gsd:.2f} m")
-            km2 = w * h * gsd * gsd / 1e6
-            if device.type == "cpu" and km2 >= 0.1:
-                # measured on a 24-thread CPU: ~22 min per km2, ~12 with --fast
-                _log(f"Running on the CPU: expect roughly {22 * km2:.0f} minutes for {km2:.2f} km2"
-                     + ("" if not args.tta else f" (about {12 * km2:.0f} with --fast)")
-                     + "; a GPU needs under a minute per km2."
-                     + ("" if args.extent else " Try a small area first (--extent)."))
-        if gsd_note:
-            _log(f"  {gsd_note}")
-        if abs(factor - 1.0) > 1e-6:
-            _log(f"Inference at x{factor:.2f} ({int(w * factor)}x{int(h * factor)} px)")
-        if args.tta or args.logit_adjust:
-            tta = "off"
-            if args.tta:
-                tta = (f"on tiles reaching {args.tta_gate:.2f}" if args.tta_gate else "on")
-            _log(f"Flip averaging: {tta}, "
-                 f"logit adjustment: {'on' if args.logit_adjust else 'off'}")
+    factor, gsd, gsd_note = working_factor(before_geo or after_geo, args.target_gsd,
+                                           args.scale, before_img.shape)
+    if gsd:
+        _log(f"Pixel size: {gsd:.2f} m")
+        km2 = w * h * gsd * gsd / 1e6
+        if device.type == "cpu" and km2 >= 0.1:
+            # measured on a 24-thread CPU: ~22 min per km2, ~12 with --fast
+            _log(f"Running on the CPU: expect roughly {22 * km2:.0f} minutes for {km2:.2f} km2"
+                 + ("" if not args.tta else f" (about {12 * km2:.0f} with --fast)")
+                 + "; a GPU needs under a minute per km2."
+                 + ("" if args.extent else " Try a small area first (--extent)."))
+    if gsd_note:
+        _log(f"  {gsd_note}")
+    if abs(factor - 1.0) > 1e-6:
+        _log(f"Inference at x{factor:.2f} ({int(w * factor)}x{int(h * factor)} px)")
+    if args.tta or args.logit_adjust:
+        tta = "off"
+        if args.tta:
+            tta = (f"on tiles reaching {args.tta_gate:.2f}" if args.tta_gate else "on")
+        _log(f"Flip averaging: {tta}, "
+             f"logit adjustment: {'on' if args.logit_adjust else 'off'}")
 
     os.makedirs(args.output, exist_ok=True)
 
-    from uchange_qgis_plugin.tiling import run_tiled_inference
-
     t0 = time.time()
-    _log(f"Running {'SCD' if args.mode == 'semantic' else 'binary'} tiled inference...")
+    _log("Running tiled inference...")
 
     def progress_fn(current, total):
         pct = 20 + int(60 * current / total)
@@ -626,24 +625,18 @@ def main():
         _log("Histogram matching: per-tile (after → before)")
 
     try:
-        if args.mode == "semantic":
-            result = run_tiled_inference(
-                model, before_img, after_img, tile_size=args.tile_size, overlap=args.overlap,
-                device=device, grayscale=args.grayscale, progress_fn=progress_fn,
-                hist_match=args.histogram_match, tta=args.tta, logit_adjust=args.logit_adjust)
-        else:
-            result = infer_probability(args, model, cs_model, before_img, after_img, factor,
-                                       device, progress_fn)
-            del cs_model
-            if args.label_free and model_type in ("dinov2", "ensemble", "dinov2_lc"):
-                from uchange_qgis_plugin.labelfree import label_free_z, nudge
-                t1 = time.time()
-                _log(f"Label-free change score (weight {args.label_free:g})...")
-                z = label_free_z(model, before_img, after_img, factor, device,
-                                 progress_fn=lambda i, n: _progress(80 + int(5 * i / n)))
-                nudge(result, z, args.label_free)
-                del z
-                _log(f"  {time.time() - t1:.1f}s")
+        result = infer_probability(args, model, cs_model, before_img, after_img, factor,
+                                   device, progress_fn)
+        del cs_model
+        if args.label_free:
+            from uchange_qgis_plugin.labelfree import label_free_z, nudge
+            t1 = time.time()
+            _log(f"Label-free change score (weight {args.label_free:g})...")
+            z = label_free_z(model, before_img, after_img, factor, device,
+                             progress_fn=lambda i, n: _progress(80 + int(5 * i / n)))
+            nudge(result, z, args.label_free)
+            del z
+            _log(f"  {time.time() - t1:.1f}s")
     except RuntimeError as e:
         if "out of memory" in str(e).lower() and args.max_vram:
             _emit({"type": "error", "message": (
@@ -676,160 +669,113 @@ def main():
         }
     _progress(85)
 
-    if args.mode == "semantic":
-        prob_map = result['prob_map']
-        semantic_to = result['semantic_to']
+    prob_map = result
+    _log(f"Prob map: min={prob_map.min():.4f}, max={prob_map.max():.4f}, mean={prob_map.mean():.4f}")
 
-        binary_mask = (prob_map > 0.5).astype(np.uint8)
-        n_change = int(binary_mask.sum())
-        total = binary_mask.size
-        _log(f"Change pixels: {n_change}/{total} ({n_change/total:.2%})")
+    if args.auto_threshold:
+        from uchange_qgis_plugin.tiling import auto_threshold
+        args.threshold = auto_threshold(prob_map)
+        _log(f"Auto threshold: {args.threshold:.6f}")
 
-        from uchange_qgis_plugin.model_bridge import SECOND_SEMANTIC_CLASSES, SECOND_SEMANTIC_PALETTE
-
-        num_classes = len(SECOND_SEMANTIC_CLASSES)
-        sem_to_masked = np.clip((semantic_to.astype(np.int16) + 1) * binary_mask, 0, num_classes - 1).astype(np.uint8)
-
-        result_info = {
-            "type": "result",
-            "mode": "semantic",
-            "stats": {"change_pixels": n_change, "total_pixels": total},
-        }
-
-        if geo_info:
-            from uchange_qgis_plugin.raster_io import save_semantic_geotiff, save_binary_geotiff
-            binary_path = os.path.join(args.output, "binary_change.tif")
-            semantic_path = os.path.join(args.output, "semantic_change.tif")
-            save_binary_geotiff(binary_mask, geo_info["geotransform"], geo_info["projection"], binary_path)
-            save_semantic_geotiff(sem_to_masked, geo_info["geotransform"], geo_info["projection"],
-                                  semantic_path,
-                                  SECOND_SEMANTIC_CLASSES, SECOND_SEMANTIC_PALETTE)
-            _log(f"Saved: {binary_path} (georeferenced)")
-            _log(f"Saved: {semantic_path} (georeferenced)")
-            result_info["binary_path"] = binary_path
-            result_info["semantic_path"] = semantic_path
-
-        palette = np.array(SECOND_SEMANTIC_PALETTE, dtype=np.uint8)
-        colored = palette[sem_to_masked]
-        png_path = os.path.join(args.output, "semantic_change.png")
-        Image.fromarray(colored).save(png_path)
-        _log(f"Saved: {png_path}")
-
-        comparison_path = os.path.join(args.output, "comparison.png")
-        save_comparison(comparison_path, [before_img, after_img, colored])
-        _log(f"Saved: {comparison_path}")
-
-        _progress(100)
-        _emit(result_info)
-
-    else:
-        prob_map = result
-        _log(f"Prob map: min={prob_map.min():.4f}, max={prob_map.max():.4f}, mean={prob_map.mean():.4f}")
-
-        if args.auto_threshold:
-            from uchange_qgis_plugin.tiling import auto_threshold
-            args.threshold = auto_threshold(prob_map)
-            _log(f"Auto threshold: {args.threshold:.6f}")
-
-        from uchange_qgis_plugin.cleanup import clean_mask, to_pixels
-        from uchange_qgis_plugin.resolution import pixel_size_m
-        area_px, width_px = to_pixels(gsd or pixel_size_m(before_geo or after_geo),
-                                      args.min_blob_m2, args.min_width_m)
-        if args.filter_false_alarms:
-            from uchange_qgis_plugin.falsealarm_filter import filter_mask, load_filter
-            bf = preset["false_alarm_filter"]
-            flt = load_filter(os.path.join(project_root, bf["file"]))
-            # auto: the redraw threshold tested with the filter; a set threshold is used as is
-            redraw = bf["redraw"] if threshold_was_auto else args.threshold
-            low = min(bf["low"], redraw)
-            min_score = bf["min_score"] if args.filter_min_score is None else args.filter_min_score
-            orphan_peak = None if args.no_filter_orphans else bf.get("orphan_peak")
+    from uchange_qgis_plugin.cleanup import clean_mask, to_pixels
+    from uchange_qgis_plugin.resolution import pixel_size_m
+    area_px, width_px = to_pixels(gsd or pixel_size_m(before_geo or after_geo),
+                                  args.min_blob_m2, args.min_width_m)
+    if args.filter_false_alarms:
+        from uchange_qgis_plugin.falsealarm_filter import filter_mask, load_filter
+        bf = preset["false_alarm_filter"]
+        flt = load_filter(os.path.join(project_root, bf["file"]))
+        # auto: the redraw threshold tested with the filter; a set threshold is used as is
+        redraw = bf["redraw"] if threshold_was_auto else args.threshold
+        low = min(bf["low"], redraw)
+        min_score = bf["min_score"] if args.filter_min_score is None else args.filter_min_score
+        orphan_peak = None if args.no_filter_orphans else bf.get("orphan_peak")
+        if device.type == "cuda":
+            torch.cuda.empty_cache()        # the inference's cached blocks, for the filter
+        t1 = time.time()
+        _log(f"False-alarm filter: changes at {low:.2f}, keep if judged real >= {min_score:.2f}, "
+             f"outlines at {redraw:.2f}...")
+        binary_mask, fstats = filter_mask(
+            prob_map, before_img, after_img, model.backbone,
+            gsd or pixel_size_m(before_geo or after_geo) or 0.5, flt, device,
+            low=low, redraw=redraw, min_score=min_score, orphan_peak=orphan_peak,
+            progress_fn=lambda i, n: _progress(85 + int(10 * i / n)))
+        weak = (f", and {fstats['orphans_kept']} of {fstats['orphans']} weaker ones"
+                if orphan_peak else "")
+        _log(f"  kept {fstats['kept']} of {fstats['blobs']} changes{weak} ({time.time() - t1:.1f}s; "
+             f"{fstats['finished']} close enough to the cut to need all four rotations)")
+        args.threshold = redraw
+        scores = {"prob": prob_map, "filter_labels": fstats["labels"],
+                  "filter_real": fstats["real_prob"]}
+        if not labelled:                    # land cover still needs the backbone
+            del model
             if device.type == "cuda":
-                torch.cuda.empty_cache()        # the inference's cached blocks, for the filter
-            t1 = time.time()
-            _log(f"False-alarm filter: changes at {low:.2f}, keep if judged real >= {min_score:.2f}, "
-                 f"outlines at {redraw:.2f}...")
-            binary_mask, fstats = filter_mask(
-                prob_map, before_img, after_img, model.backbone,
-                gsd or pixel_size_m(before_geo or after_geo) or 0.5, flt, device,
-                low=low, redraw=redraw, min_score=min_score, orphan_peak=orphan_peak,
-                progress_fn=lambda i, n: _progress(85 + int(10 * i / n)))
-            weak = (f", and {fstats['orphans_kept']} of {fstats['orphans']} weaker ones"
-                    if orphan_peak else "")
-            _log(f"  kept {fstats['kept']} of {fstats['blobs']} changes{weak} ({time.time() - t1:.1f}s; "
-                 f"{fstats['finished']} close enough to the cut to need all four rotations)")
-            args.threshold = redraw
-            scores = {"prob": prob_map, "filter_labels": fstats["labels"],
-                      "filter_real": fstats["real_prob"]}
-            if not labelled:                    # land cover still needs the backbone
-                del model
-                if device.type == "cuda":
-                    torch.cuda.empty_cache()
-        else:
-            scores = {"prob": prob_map}
-            binary_mask = clean_mask(prob_map, args.threshold, args.core_threshold or None,
-                                     area_px, width_px)
-        if not args.filter_false_alarms and (args.core_threshold or args.min_blob_m2 or args.min_width_m):
-            raw = int((prob_map > args.threshold).sum())
-            _log(f"Speckle removal (core {args.core_threshold:.2f}, min {args.min_blob_m2:g} m2, "
-                 f"min width {args.min_width_m:g} m): {raw - int(binary_mask.sum())} pixels removed")
-        n_change = int(binary_mask.sum())
-        total = binary_mask.size
-        _log(f"Change pixels: {n_change}/{total} ({n_change/total:.2%})")
+                torch.cuda.empty_cache()
+    else:
+        scores = {"prob": prob_map}
+        binary_mask = clean_mask(prob_map, args.threshold, args.core_threshold or None,
+                                 area_px, width_px)
+    if not args.filter_false_alarms and (args.core_threshold or args.min_blob_m2 or args.min_width_m):
+        raw = int((prob_map > args.threshold).sum())
+        _log(f"Speckle removal (core {args.core_threshold:.2f}, min {args.min_blob_m2:g} m2, "
+             f"min width {args.min_width_m:g} m): {raw - int(binary_mask.sum())} pixels removed")
+    n_change = int(binary_mask.sum())
+    total = binary_mask.size
+    _log(f"Change pixels: {n_change}/{total} ({n_change/total:.2%})")
 
-        result_info = {
-            "type": "result",
-            "mode": "binary",
-            "stats": {"change_pixels": n_change, "total_pixels": total},
-            "threshold": args.threshold,
-        }
+    result_info = {
+        "type": "result",
+        "mode": "binary",
+        "stats": {"change_pixels": n_change, "total_pixels": total},
+        "threshold": args.threshold,
+    }
 
-        if labelled:
-            result_info.update(label_changes(
-                args, model, lc_head, device, binary_mask, before_img, after_img,
-                geo_info, factor / args.scale, scores))
-        elif args.output_gpkg and geo_info:
-            _log(f"Polygonizing to {args.output_gpkg}...")
-            from uchange_qgis_plugin.raster_io import polygonize_mask
+    if labelled:
+        result_info.update(label_changes(
+            args, model, lc_head, device, binary_mask, before_img, after_img,
+            geo_info, factor / args.scale, scores))
+    elif args.output_gpkg and geo_info:
+        _log(f"Polygonizing to {args.output_gpkg}...")
+        from uchange_qgis_plugin.raster_io import polygonize_mask
 
-            pixel_w = abs(geo_info["geotransform"][1])
-            pixel_h = abs(geo_info["geotransform"][5])
-            min_area_map = args.min_area * pixel_w * pixel_h
+        pixel_w = abs(geo_info["geotransform"][1])
+        pixel_h = abs(geo_info["geotransform"][5])
+        min_area_map = args.min_area * pixel_w * pixel_h
 
-            style = "convex hull" if args.style == "convex" else args.style
-            total_polys, final_polys = polygonize_mask(
-                binary_mask, geo_info["geotransform"], geo_info["projection"],
-                args.output_gpkg, min_area=min_area_map, style=style, **scores,
-            )
-            _log(f"Changes written: {final_polys} (of {total_polys}; the rest under the minimum area)")
-            result_info["output_path"] = args.output_gpkg
-            result_info["total_polys"] = total_polys
-            result_info["final_polys"] = final_polys
+        style = "convex hull" if args.style == "convex" else args.style
+        total_polys, final_polys = polygonize_mask(
+            binary_mask, geo_info["geotransform"], geo_info["projection"],
+            args.output_gpkg, min_area=min_area_map, style=style, **scores,
+        )
+        _log(f"Changes written: {final_polys} (of {total_polys}; the rest under the minimum area)")
+        result_info["output_path"] = args.output_gpkg
+        result_info["total_polys"] = total_polys
+        result_info["final_polys"] = final_polys
 
-        elif geo_info:
-            mask_path = os.path.join(args.output, "mask.tif")
-            save_geotiff(mask_path, binary_mask * 255, geo_info)
-            _log(f"Saved: {mask_path} (georeferenced)")
-            result_info["output_path"] = mask_path
-        else:
-            mask_path = os.path.join(args.output, "mask.png")
-            Image.fromarray(binary_mask * 255).save(mask_path)
-            _log(f"Saved: {mask_path}")
-            result_info["output_path"] = mask_path
+    elif geo_info:
+        mask_path = os.path.join(args.output, "mask.tif")
+        save_geotiff(mask_path, binary_mask * 255, geo_info)
+        _log(f"Saved: {mask_path} (georeferenced)")
+        result_info["output_path"] = mask_path
+    else:
+        mask_path = os.path.join(args.output, "mask.png")
+        Image.fromarray(binary_mask * 255).save(mask_path)
+        _log(f"Saved: {mask_path}")
+        result_info["output_path"] = mask_path
 
-        comparison_path = os.path.join(args.output, "comparison.png")
-        save_comparison(comparison_path, [before_img, after_img, binary_mask * 255])
-        _log(f"Saved: {comparison_path}")
+    comparison_path = os.path.join(args.output, "comparison.png")
+    save_comparison(comparison_path, [before_img, after_img, binary_mask * 255])
+    _log(f"Saved: {comparison_path}")
 
-        prob_vis = np.empty(prob_map.shape, dtype=np.uint8)
-        for y in range(0, prob_map.shape[0], 1024):     # no full-size float temporaries
-            prob_vis[y:y + 1024] = (prob_map[y:y + 1024] * 255).clip(0, 255)
-        prob_path = os.path.join(args.output, "probability.png")
-        Image.fromarray(prob_vis).save(prob_path, compress_level=1)
-        _log(f"Saved: {prob_path}")
+    prob_vis = np.empty(prob_map.shape, dtype=np.uint8)
+    for y in range(0, prob_map.shape[0], 1024):     # no full-size float temporaries
+        prob_vis[y:y + 1024] = (prob_map[y:y + 1024] * 255).clip(0, 255)
+    prob_path = os.path.join(args.output, "probability.png")
+    Image.fromarray(prob_vis).save(prob_path, compress_level=1)
+    _log(f"Saved: {prob_path}")
 
-        _progress(100)
-        _emit(result_info)
+    _progress(100)
+    _emit(result_info)
 
     if coreg_cleanup:
         coreg_cleanup()

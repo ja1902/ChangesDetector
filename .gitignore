@@ -23,9 +23,5 @@ logs/
 **/probs/
 **/*.part
 
-
-# Machine-specific paths (copy configs/paths.example.yaml)
-configs/paths.yaml
-
 # Local test artefacts
 .pytest_cache/

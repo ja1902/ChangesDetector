@@ -33,7 +33,6 @@ Writes <out>/dinov2_finetuned.pth in the plugin's format (backbone + decoder + c
 load it in QGIS or pass it to detect_changes.py / benchmarks/bench.py with --weights.
 """
 import argparse
-import os
 import random
 import sys
 import time

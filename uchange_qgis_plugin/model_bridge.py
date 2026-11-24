@@ -5,12 +5,6 @@ import ctypes
 
 import numpy as np
 
-from .model_registry import (
-    MODEL_REGISTRY, DEFAULT_WEIGHTS,
-    SECOND_SEMANTIC_CLASSES, SECOND_SEMANTIC_PALETTE,
-    is_scd_model, resolve_weights_path,
-)
-
 
 def _ensure_venv_on_path():
     pyver = f"python{sys.version_info.major}.{sys.version_info.minor}"
@@ -77,7 +71,11 @@ _NORM_MEAN = np.array([0.485, 0.456, 0.406], dtype=np.float32)
 _NORM_STD = np.array([0.229, 0.224, 0.225], dtype=np.float32)
 
 
-def build_model(checkpoint_path, device=None, model_type="opencd"):
+def build_model(checkpoint_path, device=None, model_type="dinov2"):
+    """A DINOv2 change model (the only kind left; ChangerEx and the SCD UPerNet were
+    removed in v0.10.2)."""
+    if model_type != "dinov2":
+        raise ValueError(f"Unknown model type {model_type!r}: only 'dinov2' models are supported")
     if device is None:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -85,14 +83,9 @@ def build_model(checkpoint_path, device=None, model_type="opencd"):
     if cache_key in _model_cache:
         return _model_cache[cache_key], "Model loaded from cache"
 
-    from .models import build_changer_model, build_scd_model, build_dinov2_model
+    from .models import build_dinov2_model
 
-    if model_type == "opencd_scd":
-        model, summary = build_scd_model(checkpoint_path, device)
-    elif model_type == "dinov2":
-        model, summary = build_dinov2_model(checkpoint_path, device)
-    else:
-        model, summary = build_changer_model(checkpoint_path, device)
+    model, summary = build_dinov2_model(checkpoint_path, device)
 
     _model_cache[cache_key] = model
     return model, summary

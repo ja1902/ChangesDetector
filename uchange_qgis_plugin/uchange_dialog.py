@@ -18,8 +18,7 @@ from qgis.PyQt.QtGui import QColor
 from qgis.gui import QgsExtentGroupBox, QgsMapLayerComboBox
 
 from .model_registry import (
-    MODEL_REGISTRY, PRESETS, is_scd_model, is_labelled_model, resolve_weights_path,
-    SECOND_SEMANTIC_CLASSES, SECOND_SEMANTIC_PALETTE,
+    MODEL_REGISTRY, PRESETS, is_labelled_model, resolve_weights_path,
     LANDCOVER_CLASSES, LANDCOVER_PALETTE,
 )
 
@@ -481,22 +480,15 @@ class UChangeDialog(QDialog):
         to_m = QgsUnitTypes.fromUnitToUnitFactor(layer.crs().mapUnits(), QgsUnitTypes.DistanceMeters)
         return r.width() * r.height() * to_m * to_m / 1e6 if not r.isEmpty() else None
 
-    def _is_scd_mode(self):
+    def _is_semantic_mode(self):
+        """Labelled change: polygons with what each change was and became."""
         return self.mode_selector.currentIndex() == 1
 
-    def _is_labelled(self):
-        """Semantic mode with a model that writes labelled polygons."""
-        return (self._is_scd_mode() and not self.custom_weights_check.isChecked()
-                and is_labelled_model(self.model_selector.currentText()))
-
-    def _raster_output(self):
-        return self._is_scd_mode() and not self._is_labelled()
-
     def _populate_model_selector(self):
-        scd = self._is_scd_mode()
+        semantic = self._is_semantic_mode()
         self.model_selector.clear()
         for name in self._model_registry:
-            if is_scd_model(name) == scd:
+            if is_labelled_model(name) == semantic:
                 self.model_selector.addItem(name)
 
     def _toggle_auto_threshold(self, state):
@@ -543,20 +535,7 @@ class UChangeDialog(QDialog):
             lab = w.parent().layout().labelForField(w) if w.parent() and w.parent().layout() else None
             if lab is not None:
                 lab.setVisible(tiles)
-        self.filter_widget.setVisible(self._uses_filter() and not self._raster_output())
-        # Threshold and min-area apply to everything that writes polygons.
-        scd = self._raster_output()
-        self.auto_threshold_check.setVisible(not scd)
-        self.threshold_widget.setVisible(not scd and not self.auto_threshold_check.isChecked())
-        self.min_area.setVisible(not scd)
-        proc_form = self.auto_threshold_check.parent().layout()
-        if proc_form:
-            for row in range(proc_form.rowCount()):
-                label = proc_form.itemAt(row, QFormLayout.LabelRole)
-                field = proc_form.itemAt(row, QFormLayout.FieldRole)
-                if field and field.widget() in (self.auto_threshold_check, self.threshold_widget, self.min_area):
-                    if label and label.widget():
-                        label.widget().setVisible(not scd)
+        self.filter_widget.setVisible(self._uses_filter())
 
     def _on_model_changed(self, name):
         if name:
@@ -588,22 +567,13 @@ class UChangeDialog(QDialog):
             self.weights_path.setText(path)
 
     def _browse_output(self):
-        if self._raster_output():
-            path, _ = QFileDialog.getSaveFileName(
-                self, "Save SCD output", "", "GeoTIFF (*.tif)"
-            )
-            if path:
-                if not path.endswith(".tif"):
-                    path += ".tif"
-                self.output_path.setText(path)
-        else:
-            path, _ = QFileDialog.getSaveFileName(
-                self, "Save GeoPackage", "", "GeoPackage (*.gpkg)"
-            )
-            if path:
-                if not path.endswith(".gpkg"):
-                    path += ".gpkg"
-                self.output_path.setText(path)
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Save GeoPackage", "", "GeoPackage (*.gpkg)"
+        )
+        if path:
+            if not path.endswith(".gpkg"):
+                path += ".gpkg"
+            self.output_path.setText(path)
 
     def _log(self, msg):
         self.log_output.append(msg)
@@ -626,60 +596,13 @@ class UChangeDialog(QDialog):
                 "Run the installer to download weights, or use a custom weights file.")
             return False
         if not self.output_path.text():
-            label = "output GeoTIFF path" if self._raster_output() else "output GeoPackage path"
-            QMessageBox.warning(self, "Error", f"Specify an {label}.")
+            QMessageBox.warning(self, "Error", "Specify an output GeoPackage path.")
             return False
         problem = self._area_problem()
         if problem:
             QMessageBox.warning(self, "Area to process", problem)
             return False
         return True
-
-    def _run_coregistration_subprocess(self, ref_path, tgt_path):
-        import subprocess
-        import json
-        try:
-            from ._env_config import VENV_PYTHON
-        except ImportError:
-            return None
-
-        if not os.path.isfile(VENV_PYTHON):
-            return None
-
-        project_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        script = (
-            "import sys, json, os\n"
-            f"sys.path.insert(0, {repr(project_dir)})\n"
-            "from uchange_qgis_plugin.coregistration import coregister_images\n"
-            f"r = coregister_images({repr(ref_path)}, {repr(tgt_path)}, "
-            "max_shift=50, window_size=(1024, 1024))\n"
-            "json.dump({'success': r.success, 'corrected_path': r.corrected_path,\n"
-            "  'shift_x_px': r.shift_x_px, 'shift_y_px': r.shift_y_px,\n"
-            "  'message': r.message}, sys.stdout)\n"
-        )
-        try:
-            proc = subprocess.run(
-                [VENV_PYTHON, "-c", script],
-                capture_output=True, text=True, timeout=120,
-            )
-        except subprocess.TimeoutExpired:
-            return {"error": "Co-registration timed out (120s)"}
-
-        if proc.returncode != 0:
-            if proc.returncode < 0:
-                return {"error": "Co-registration ran out of memory (images may be too large)"}
-            stderr = proc.stderr.strip().split("\n")[-1] if proc.stderr else "unknown error"
-            return {"error": f"Co-registration failed: {stderr}"}
-
-        try:
-            result = json.loads(proc.stdout)
-        except json.JSONDecodeError:
-            return {"error": "Co-registration returned invalid output"}
-
-        if not result.get("success"):
-            return {"error": result.get("message", "Co-registration failed")}
-
-        return result
 
     def _on_device_changed(self, text):
         # The memory limit only means something on a GPU.
@@ -787,7 +710,7 @@ class UChangeDialog(QDialog):
         output_path = self.output_path.text()
         weights = self._get_weights_path()
         device = self._resolve_device_str()
-        scd_mode = self._is_scd_mode()
+        semantic = self._is_semantic_mode()
 
         output_dir = tempfile.mkdtemp(prefix="uchange_")
 
@@ -809,19 +732,16 @@ class UChangeDialog(QDialog):
             cmd.extend(["--extent", area])
             self._log(f"Area to process: {area} ({self.extent_box.outputCrs().authid() or 'raster coordinates'})")
 
-        if scd_mode and not self._is_labelled():
-            cmd.extend(["--mode", "semantic"])
+        if self.auto_threshold_check.isChecked():
+            cmd.extend(["--threshold", "auto"])
         else:
-            if self.auto_threshold_check.isChecked():
-                cmd.extend(["--threshold", "auto"])
-            else:
-                cmd.extend(["--threshold", f"{self.threshold_slider.value() / 100:.2f}"])
-            gpkg_path = output_path
-            if not gpkg_path.endswith(".gpkg"):
-                gpkg_path = os.path.splitext(gpkg_path)[0] + ".gpkg"
-            cmd.extend(["--output-gpkg", gpkg_path])
-            if self.min_area.value():
-                cmd.extend(["--min-area-m2", str(self.min_area.value())])
+            cmd.extend(["--threshold", f"{self.threshold_slider.value() / 100:.2f}"])
+        gpkg_path = output_path
+        if not gpkg_path.endswith(".gpkg"):
+            gpkg_path = os.path.splitext(gpkg_path)[0] + ".gpkg"
+        cmd.extend(["--output-gpkg", gpkg_path])
+        if self.min_area.value():
+            cmd.extend(["--min-area-m2", str(self.min_area.value())])
 
         if not self.coregister_check.isChecked():
             cmd.append("--no-coreg")
@@ -837,7 +757,7 @@ class UChangeDialog(QDialog):
             cmd.extend(["--preset", model_entry["preset"]])
             if self.fast_mode_check.isChecked():
                 cmd.append("--fast")
-            if self._uses_filter() and not self._raster_output():
+            if self._uses_filter():
                 if self.filter_check.isChecked():
                     cmd.extend(["--filter-false-alarms",
                                 "--filter-min-score", f"{self.filter_score.value():.2f}"])
@@ -929,8 +849,6 @@ class UChangeDialog(QDialog):
 
         if result_info.get("mode") == "labelled":
             self._handle_labelled_result(result_info, output_path, output_dir)
-        elif scd_mode:
-            self._handle_scd_result(result_info, output_dir)
         else:
             self._handle_binary_result(result_info, output_path, output_dir)
 
@@ -938,7 +856,7 @@ class UChangeDialog(QDialog):
         shutil.rmtree(output_dir, ignore_errors=True)
 
         self._set_progress(100)
-        mode_label = "Semantic change" if scd_mode else "Change"
+        mode_label = "Labelled change" if semantic else "Change"
         self._log("Done!")
         self.iface.messageBar().pushSuccess("ChangeDetection", f"{mode_label} detection complete!")
 
@@ -1003,45 +921,3 @@ class UChangeDialog(QDialog):
         QgsProject.instance().addMapLayer(layer)
         self._log("Layer 'Labelled change' added (colour = what it became; dashed white = "
                   "change whose type is unclear; see the 'change' field for from -> to).")
-
-    def _handle_scd_result(self, result_info, output_dir):
-        output_base = self.output_path.text()
-        dest_dir = os.path.dirname(output_base) or "."
-        os.makedirs(dest_dir, exist_ok=True)
-
-        import shutil
-
-        binary_path = os.path.join(output_dir, "binary_change.tif")
-        semantic_path = os.path.join(output_dir, "semantic_change.tif")
-        dest_binary = os.path.join(dest_dir, "binary_change.tif")
-        dest_semantic = os.path.join(dest_dir, "semantic_change.tif")
-
-        if os.path.isfile(binary_path):
-            shutil.copy2(binary_path, dest_binary)
-            self._log(f"Saved: {dest_binary}")
-        if os.path.isfile(semantic_path):
-            shutil.copy2(semantic_path, dest_semantic)
-            self._log(f"Saved: {dest_semantic}")
-
-        if self.add_to_project.isChecked():
-            from qgis.core import QgsRasterLayer, QgsPalettedRasterRenderer
-
-            if os.path.isfile(dest_binary):
-                mask_layer = QgsRasterLayer(dest_binary, "Binary Change")
-                if mask_layer.isValid():
-                    QgsProject.instance().addMapLayer(mask_layer)
-                    self._log("Layer 'Binary Change' added.")
-
-            if os.path.isfile(dest_semantic):
-                sem_layer = QgsRasterLayer(dest_semantic, "Semantic Change")
-                if sem_layer.isValid():
-                    classes = []
-                    for i in range(1, len(SECOND_SEMANTIC_CLASSES)):
-                        r, g, b = SECOND_SEMANTIC_PALETTE[i]
-                        classes.append(QgsPalettedRasterRenderer.Class(
-                            i, QColor(r, g, b), SECOND_SEMANTIC_CLASSES[i]))
-                    renderer = QgsPalettedRasterRenderer(
-                        sem_layer.dataProvider(), 1, classes)
-                    sem_layer.setRenderer(renderer)
-                    QgsProject.instance().addMapLayer(sem_layer)
-                    self._log("Layer 'Semantic Change' added.")

@@ -8,7 +8,6 @@ Needs the installed model weights (run the installer first). No test framework:
 
 Prints PASS / FAIL per check; the exit code is the number of failures.
 """
-import os
 import subprocess
 import sys
 import tempfile
