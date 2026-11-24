@@ -35,7 +35,7 @@ PRESETS = {
     # "redraw". Chosen on 8 hand-checked Google Earth squares, each scored by a
     # model trained without its place: 69% of changes found with 10 false alarms
     # per km2. Checked unchanged on pr2_c1 (23 changes, unseen): 16/23 with 14
-    # false alarms per km2 (work_dirs/exp_recheck).
+    # false alarms per km2 (EXPERIMENTS.md).
     # The label-free nudge (labelfree.py) is no longer used: with the filter it
     # adds nothing, alone it is level at 20 false alarms per km2 and worse below.
     # "threshold" (0.85, best object F1 without the filter) applies when the
@@ -53,7 +53,7 @@ PRESETS = {
     },
     # The same pipeline with the model finetuned alongside S2Looking (off-angle satellite
     # pairs) instead of LEVIR-CD, and its own false-alarm filter (stage 2 refit on that
-    # model's maps, work_dirs/exp_s2l/export_filter_s2l.py). Same 8 + 5 squares, each
+    # model's maps). Same 8 + 5 squares, each
     # scored by a model trained without its city: 70.5% curve mean against 66.5% for
     # "finetuned" (with orphans 71.4% against 70.3%); much better on two places of the
     # training data, worse on a third; pr1_c1 (unseen, strong building lean) 9 found against 8

@@ -288,12 +288,13 @@ on its own held-out maps. Retrain it with `finetune_dinov2.py --levir <S2Looking
 
 ## Speed and GPU memory (v0.10.2)
 
-Profiled on pr2_c1 (1 km2 at 0.49 m; GPU: a T4; CPU: 24 threads). GPU run: inference 31 s, of which flip averaging 22 s (98%
-of tiles reach the 0.5 gate), the filter 28 s (DINOv2 on its crops 23 s). The decoder costs
-as much as the backbone (131 against 134 ms per 8 tiles). Peak 1.04 GB, 0.8 GB of it
-decoder feature maps. CPU, a 500 m area: inference 70% (flips three quarters of it), the
-filter 30%. Float16 results depend on the batch size (8 against 4 tiles: up to 0.017 in
-probability, 5 of 22 outlines move a little); the same run repeated is byte for byte the same.
+Profiled on pr2_c1 (1 km2 at 0.49 m; GPU: a T4; CPU: 24 threads). GPU run: inference 31 s,
+of which flip averaging 22 s (98% of tiles reach the 0.5 gate), the filter 28 s (DINOv2 on
+its crops 23 s). The decoder costs as much as the backbone (131 against 134 ms per 8
+tiles). Peak 1.04 GB, 0.8 GB of it decoder feature maps. CPU, a 500 m area: inference 70%
+(flips three quarters of it), the filter 30%. Float16 results depend on the batch size (8
+against 4 tiles: up to 0.017 in probability, 5 of 22 outlines move a little); the same run
+repeated is byte for byte the same.
 
 | idea | result |
 |---|---|

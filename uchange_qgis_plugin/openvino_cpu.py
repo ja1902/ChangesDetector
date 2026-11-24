@@ -3,8 +3,9 @@
 Against PyTorch's own CPU path (the decoder one tile at a time), the change model ran
 1.46x faster and the false-alarm filter's backbone (280 px crops) 1.20x on a 6-core
 laptop CPU, and 1.19x and 1.40x on a 24-thread CPU;
-change probabilities stay within 1e-8 of PyTorch's (benchmarks/cpu_backends.py). detect_changes uses it on the CPU when the package is
-installed; anything that fails falls back to PyTorch.
+change probabilities stay within 1e-8 of PyTorch's (benchmarks/cpu_backends.py).
+detect_changes uses it on the CPU when the package is installed; anything that fails falls
+back to PyTorch.
 
 Each model is converted once per model file and input size (about 20 s) and kept, about
 0.35 GB, in openvino_cache/ beside the model file; later runs load it in about a second.

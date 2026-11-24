@@ -8,8 +8,8 @@ is then redrawn as its part above the usual threshold, so outlines stay as tight
 without the filter.
 
 Tested on the 8 held-out squares of our dataset (each scored by a model and classifier
-trained without its place) and on pr2_c1, which neither had seen
-(work_dirs/exp_recheck/polyfilter.py, polyfilter_fresh.py): at the same share of changes
+trained without its place) and on pr2_c1, which neither had seen (EXPERIMENTS.md): at the
+same share of changes
 found, 20-45 % fewer false alarms; on pr2 16/23 found with 14 false alarms per km2,
 against 28 without the filter. It can drop a real change that touches a big new shadow,
 because the low threshold merges the two into one blob.
@@ -19,14 +19,14 @@ Weaker changes ("orphans", optional, orphan_peak): local peaks of the map (smoot
 the part of the map within 15 m that stays above half its peak (at least 50 m2), is judged
 by the same classifier and kept at the same min_score, and is drawn as that part. On the
 13 squares of our dataset (models trained without the square's city) this found 4 more
-changes in 100 at the same false-alarm rate, mostly ones under 100 m2
-(work_dirs/exp_orphan/step2.py, benchmarks/paired_eval.py); on pr1_c1 and pr2_c1 (unseen)
+changes in 100 at the same false-alarm rate, mostly ones under 100 m2 (EXPERIMENTS.md);
+on pr1_c1 and pr2_c1 (unseen)
 it changed nothing at the default min_score and a little at lower ones.
 
 Only valid on the map it was trained on: the finetuned model at x1.4 with flip
 averaging and WITHOUT the label-free nudge (preset "synthetic" pipeline). The backbone is
 frozen and the same in every DINOv2 checkpoint here, so the change model's backbone is
-reused. Weights: weights/falsealarm_filter_finetuned.npz (work_dirs/exp_recheck/export_filter.py).
+reused. Weights: weights/falsealarm_filter_finetuned.npz.
 """
 import numpy as np
 import torch
