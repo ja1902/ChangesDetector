@@ -5,8 +5,9 @@ of the same place: new buildings, construction sites, demolitions and cleared la
 outlines every change as a polygon, with a score for how likely it is to be real, and can
 also say what each area changed from and into ("farmland -> building").
 
-It runs on a GPU (under a minute per km² at 0.5 m) or on a CPU (about 22 minutes per km²),
-and inference runs in its own Python environment, so it works with any QGIS 3.22+.
+It runs on a GPU (under a minute per km² at 0.5 m) or on a CPU (about 35 minutes per km² on a
+typical laptop or desktop, less on bigger CPUs), and inference runs in its own Python
+environment, so it works with any QGIS 3.22+.
 
 - What changed in each version: [CHANGELOG.md](CHANGELOG.md)
 - Every experiment and result behind the current models: [EXPERIMENTS.md](EXPERIMENTS.md)
@@ -202,7 +203,7 @@ Results then differ by float16 rounding (tested level on the 13 areas). A limit 
 the model needs fails with a clear message.
 
 **Slow:** use a GPU if you have one; otherwise tick **Process only an area** to run on part
-of the image, and **Fast mode** (about 12 instead of 22 minutes per km² on a 24-thread CPU).
+of the image, and **Fast mode** (about 20 instead of 35 minutes per km² on a typical CPU).
 On the CPU the model runs in OpenVINO, which the installer adds: 1.1-1.4x faster than
 PyTorch depending on the CPU (the log says "CPU backend: OpenVINO"). If it says PyTorch,
 `pip install openvino "numpy==<the installed version>"` in the plugin's environment adds it;

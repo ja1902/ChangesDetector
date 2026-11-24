@@ -610,9 +610,10 @@ def main():
         _log(f"Pixel size: {gsd:.2f} m")
         km2 = w * h * gsd * gsd / 1e6
         if device.type == "cpu" and km2 >= 0.1:
-            # measured on a 24-thread CPU: ~22 min per km2, ~12 with --fast
-            _log(f"Running on the CPU: expect roughly {22 * km2:.0f} minutes for {km2:.2f} km2"
-                 + ("" if not args.tta else f" (about {12 * km2:.0f} with --fast)")
+            # a typical 6-8 core CPU with OpenVINO (measured: a 6-core laptop CPU runs a tile
+            # 2.2x slower than a 24-thread one, which takes ~20 min per km2, ~11 with --fast)
+            _log(f"Running on the CPU: expect roughly {35 * km2:.0f} minutes for {km2:.2f} km2"
+                 + ("" if not args.tta else f" (about {20 * km2:.0f} with --fast)")
                  + "; a GPU needs under a minute per km2."
                  + ("" if args.extent else " Try a small area first (--extent)."))
     if gsd_note:

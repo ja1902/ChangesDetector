@@ -40,7 +40,8 @@ and after, the two versions run in turn:
   CPU has (where there is no hyperthreading to leave room); `--threads N` sets it. The
   decoder also takes one tile at a time on the CPU (2.4 s per 4 tiles against 3.1 s: its
   feature maps stay in the CPU caches). The CPU time estimates in the dialog and the CLI are
-  now ~22 minutes per km2, ~12 with Fast mode.
+  now for a typical 6-8 core CPU: ~35 minutes per km2, ~20 with Fast mode (a 24-thread one
+  takes ~20 and ~11).
 - **CPU: OpenVINO** (optional; the installers now add it): on the CPU the change model and
   the filter's backbone run in OpenVINO when it is installed. On a 500 m area the
   GeoPackage is byte for byte PyTorch's; the run took 196-205 s against 220-222 s on the

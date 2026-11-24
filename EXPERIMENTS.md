@@ -309,15 +309,15 @@ probability, 5 of 22 outlines move a little); the same run repeated is byte for 
 | a higher flip gate | little to gain: 78% of tiles still reach 0.8 on pr2_c1 |
 | loading the model during co-registration | dropped: AROSICS's helpers use multiprocessing, and forking while torch loads in another thread can deadlock, for ~1.5 s |
 | CPU batch of 8 | -10% to +2% depending on threads; not taken |
+| 2 flip views instead of 4 (flips are 22 of the 31 s of GPU inference) | worse: as is + 180° turn, 13 areas with the filter: curve mean -1.4 [-2.4, -0.2], found@10 -2.9; as is + left-right mirror, 8 areas: -3.2 [-4.9, -1.2]. The views move probabilities by up to 0.5-0.75: they do real work |
 | **CPU: decoder one tile at a time** | **kept**: 2.4 against 3.1 s per 4 tiles (the decoder's maps stay in cache); same GeoPackage |
 | **OpenVINO 2026.4 on the CPU** (float32, converted straight from PyTorch) | **kept**: against the PyTorch path above, the change model x1.46 and the filter's backbone (280 px crops) x1.20 on a 6-core laptop CPU, x1.19 and x1.40 on a 24-thread one (`--groups`: best at 4 tiles and 16 crops per call); a 500 m area 196-205 s against 220-222 s, GeoPackage byte for byte the same; peak memory +0.7 GB (`benchmarks/cpu_backends.py`) |
 | ONNX Runtime 1.23 on the CPU | x1.17 on the laptop CPU, x0.95-1.03 on the 24-thread one: not worth a second runtime |
 
-Not tried yet, would need the full revalidation: fewer flips at inference (2 instead of 4),
-fewer rotations in the filter, reusing the main pass's features in the filter (retraining
+Not tried yet, would need the full revalidation: fewer rotations in the filter, reusing the main pass's features in the filter (retraining
 it).
-Scripts: work_dirs/exp_speed (maps.py; logs maps_dc2.log, polyfilter_lc13cdc2.log,
-paired_lc13cdc2.log).
+Scripts: work_dirs/exp_speed (maps.py, maps_flips.py; logs maps_*.log, polyfilter_lc13c*.log,
+paired_lc13c*.log).
 
 ## Caveats
 

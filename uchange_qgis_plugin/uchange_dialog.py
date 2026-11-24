@@ -628,8 +628,8 @@ class UChangeDialog(QDialog):
         device_text = self.device_selector.currentText()
         if device_text == "CPU":
             km2 = self._area_km2()
-            size = (f"For this area ({km2:.2f} km\u00b2) expect roughly {max(1, round(22 * km2))} minutes"
-                    f"{'' if not self._uses_preset() else f', or about {max(1, round(12 * km2))} with Fast mode'}"
+            size = (f"For this area ({km2:.2f} km\u00b2) expect roughly {max(1, round(35 * km2))} minutes"
+                    f"{'' if not self._uses_preset() else f', or about {max(1, round(20 * km2))} with Fast mode'}"
                     ".\n" if km2 else "")
             reply = QMessageBox.question(
                 self, "Running on the CPU",
