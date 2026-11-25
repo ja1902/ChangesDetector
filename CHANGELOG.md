@@ -5,6 +5,16 @@ details and every result behind these choices are in [EXPERIMENTS.md](EXPERIMENT
 
 ## v0.10
 
+### Faster false-alarm filter on newer CPUs (v0.10.3)
+
+- **bfloat16 for the filter on CPUs that have it** (recent AMD and Intel CPUs with
+  AVX-512 BF16 or AMX), when OpenVINO is installed: the filter's DINOv2 pass runs about 2x
+  faster, so a CPU run is about 10-15% faster. On the held-out areas 12 of about 6,500 keep /
+  drop decisions changed, with as many changes found and false alarms as before. The
+  change model itself stays in float32, and so does everything on other CPUs.
+- INT8 (8-bit) models were also tested and are not used: they were up to 2.4x faster on
+  the CPU but moved the change map too much.
+
 ### Faster, lighter on GPU memory, faster on the CPU (v0.10.2)
 
 Same results as v0.10.1: on a test pair the output is byte for byte the same, on the GPU

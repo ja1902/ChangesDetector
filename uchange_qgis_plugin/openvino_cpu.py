@@ -14,6 +14,12 @@ tile-at-a-time decoder: a CPU run peaks about 0.7 GB higher (2.9 against 2.2 GB 
 500 m area). It gets the CPU batch of 4 tiles whole and the filter's crops 16 at a time,
 the fastest on both machines (--groups: 4 and 8 tiles tie, 1 is slower; 16 and 32 crops
 tie, 8 is a little slower).
+
+On CPUs with bfloat16 units (OpenVINO lists BF16: AVX512_BF16 or AMX), the filter's
+backbone runs in bfloat16: x1.97 on the 6-core laptop CPU, and on the 13 squares of our
+dataset 12 of 6,469 keep / drop decisions changed, found changes and false alarms level
+(benchmarks/cpu_quant.py, EXPERIMENTS.md). The change model stays in float32 everywhere:
+bfloat16 gained only x1.12 there and moved more of the map.
 """
 import contextlib
 import hashlib
@@ -64,7 +70,14 @@ def _save(model, xml):
                 pass
 
 
-def _compile(make_module, example, shapes, weights_path, tag, threads, log, cache_dir=None):
+def has_bf16():
+    """Whether OpenVINO can run bfloat16 on this CPU."""
+    import openvino as ov
+    return "BF16" in ov.Core().get_property("CPU", "OPTIMIZATION_CAPABILITIES")
+
+
+def _compile(make_module, example, shapes, weights_path, tag, threads, log, cache_dir=None,
+             precision="f32"):
     import openvino as ov
     core = ov.Core()
     xml = _cache_file(weights_path, tag, cache_dir)
@@ -79,9 +92,10 @@ def _compile(make_module, example, shapes, weights_path, tag, threads, log, cach
             _save(model, xml)
         except OSError as e:
             log(f"  OpenVINO: could not keep the converted model ({e}); it is converted again next run")
-    # float32 throughout: on CPUs with bfloat16 units OpenVINO would otherwise pick bfloat16.
+    # Set explicitly: on CPUs with bfloat16 units OpenVINO would otherwise pick bfloat16.
+    # The cached graph is float32 either way; the precision is chosen here.
     return core.compile_model(model, "CPU", {"INFERENCE_NUM_THREADS": int(threads),
-                                             "INFERENCE_PRECISION_HINT": "f32",
+                                             "INFERENCE_PRECISION_HINT": precision,
                                              "PERFORMANCE_HINT": "LATENCY"})
 
 
@@ -145,14 +159,19 @@ class _Tokens(torch.nn.Module):
 
 def filter_tokens(backbone, weights_path, size, layers, threads, log, cache_dir=None):
     """The false-alarm filter's backbone pass (falsealarm_filter.backbone_tokens) in
-    OpenVINO, for filter_mask(tokens_fn=...); None if OpenVINO does not load it."""
+    OpenVINO, for filter_mask(tokens_fn=...), in bfloat16 where the CPU has it; None if
+    OpenVINO does not load it."""
     size = int(size)
     try:
         import openvino as ov
         x = torch.zeros(2, 3, size, size)
         tag = f"filter{size}-" + "-".join(str(int(l)) for l in layers)
+        precision = "bf16" if has_bf16() else "f32"
         compiled = _compile(lambda: _Tokens(backbone, size, layers).eval(), (x,),
-                            [ov.PartialShape([-1, 3, size, size])], weights_path, tag, threads, log, cache_dir)
+                            [ov.PartialShape([-1, 3, size, size])], weights_path, tag, threads, log, cache_dir,
+                            precision)
+        if precision == "bf16":
+            log("  OpenVINO: the filter's backbone runs in bfloat16 on this CPU")
         run = _Runner(compiled)
     except Exception as e:
         log(f"  OpenVINO did not load the filter's backbone ({e}); using PyTorch")

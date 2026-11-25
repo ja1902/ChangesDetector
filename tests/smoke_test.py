@@ -197,8 +197,13 @@ def _t_openvino(tmp, pair):
     assert fn is not None, "OpenVINO did not load the filter's backbone"
     ov = _Features(m.backbone, cpu, 280, (8, 11), fn).blobs(A, B, pix, GSD)
     pt = _Features(m.backbone, cpu, 280, (8, 11)).blobs(A, B, pix, GSD)
-    diff = max(float(np.abs(o - p).max()) for o, p in zip(ov, pt))
-    assert diff < 1e-3, f"filter features differ by {diff:.1e}"
+    if openvino_cpu.has_bf16():         # the filter's backbone runs in bfloat16 there
+        cos = min(float(((o * p).sum(-1) / (np.linalg.norm(o, axis=-1) * np.linalg.norm(p, axis=-1))).min())
+                  for o, p in zip(ov, pt))
+        assert cos > 0.999, f"bfloat16 filter features: cosine to float32 down to {cos:.4f}"
+    else:
+        diff = max(float(np.abs(o - p).max()) for o, p in zip(ov, pt))
+        assert diff < 1e-3, f"filter features differ by {diff:.1e}"
 
 
 # ---------------------------------------------------------------- detect_changes.py end to end
