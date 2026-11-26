@@ -62,7 +62,8 @@ the trained parts in `weights/`) and links the plugin into your QGIS plugins fol
 5. Keep the recommended model and settings, or adjust:
    - **Filter false alarms** (on) and **keep if real ≥** (0.46): lower keeps more changes
      and more false alarms;
-   - **Fast mode**: about twice as fast on the model step, slightly less accurate;
+   - **Fast mode**: about twice as fast on the model step and a third faster on the filter,
+     slightly less accurate;
    - **Min change area** in m²;
    - **Device** (Auto, CPU, GPU) and a **GPU memory limit** for small or shared GPUs.
 6. Choose the output GeoPackage and click **Run**. The result is added to the project.
@@ -154,7 +155,7 @@ Main options:
 | `--filter-min-score 0.46` | "keep if real" for the false-alarm filter |
 | `--no-filter-false-alarms`, `--no-filter-orphans` | turn the filter, or its judging of weaker changes, off |
 | `--min-area-m2 50` | drop smaller changes (`--min-area` in pixels also works) |
-| `--fast` | skip flip averaging |
+| `--fast` | skip flip averaging; the filter looks at 2 rotations instead of 4 |
 | `--device auto\|cpu\|gpu`, `--max-vram MB` | where to run, and a GPU memory limit |
 | `--threads N` | CPU threads (default: one fewer than the CPU has) |
 | `--cpu-backend auto\|openvino\|torch` | on the CPU, run the model in OpenVINO (default when installed: faster, same results) |

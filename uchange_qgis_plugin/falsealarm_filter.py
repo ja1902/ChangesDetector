@@ -44,6 +44,15 @@ _CROPS = 8 * BATCH        # crops per DINOv2 pass (2 dates per blob and rotation
 # being kept; those that are finished get exactly the full score (bit for bit). At the
 # default cut this skips ~40% of the filter's work, less at lower cuts.
 CASCADE_MARGIN = 1.75
+# Rotations of the crops the features are averaged over (k x 90 degrees). Fast mode uses
+# 0 and 180 only: the filter takes about a third less time. On 13 held-out squares
+# (classifier unchanged, trained on four) the found-vs-false-alarm curve stayed level with
+# four rotations: curve mean -0.004 (90% interval -0.010 to +0.005) with this filter, -0.002
+# (-0.009 to +0.005) with the S2Looking one; about 1% of keep / drop decisions change. 0 + 90
+# was a little worse. The cascade margin holds: the 2-rotation score was at most 1.31 above
+# the quick look (four rotations: 1.21), and the cascade changed no decision.
+ROTATIONS = (0, 1, 2, 3)
+FAST_ROTATIONS = (0, 2)
 ORPHAN_SMOOTH_M, ORPHAN_SEP_M, ORPHAN_R_M = 1.0, 5.0, 15.0
 _ROWS = 2048              # orphan search works on strips of this many rows
 
@@ -187,11 +196,12 @@ class _Features:
 
     @staticmethod
     def averaged(rot):
-        """Mean over the 4 rotations, summed in the order the filter was trained with."""
+        """Mean of the rotations' features, summed in the order given (0, 1, 2, 3 for the
+        four: the order the filter was trained with)."""
         acc = 0
-        for r in range(4):
-            acc = acc + rot[r]
-        return acc / 4
+        for v in rot:
+            acc = acc + v
+        return acc / len(rot)
 
     def blobs(self, A, B, pixels, gsd):
         """[(L, 2 in/ring, 2 dates, 768)] for the blobs given as (ys, xs), averaged over 4
@@ -313,7 +323,7 @@ class _Pixels:
 
 def filter_mask(prob, before, after, backbone, gsd, flt, device, low=0.6, redraw=0.83,
                 min_score=0.46, orphan_peak=None, progress_fn=None, cancel_fn=None,
-                cascade_margin=CASCADE_MARGIN, tokens_fn=None):
+                cascade_margin=CASCADE_MARGIN, tokens_fn=None, rotations=ROTATIONS):
     """Binary mask (uint8) of the kept, redrawn blobs, and a stats dict.
 
     prob: change probabilities (H, W) at the images' resolution; before, after: the
@@ -322,14 +332,16 @@ def filter_mask(prob, before, after, backbone, gsd, flt, device, low=0.6, redraw
     classifier's probability that it is real is at least this; orphan_peak: also judge
     the weaker changes peaking at this level outside the blobs (None = off);
     cascade_margin: judge each candidate on one rotation first and finish only those whose
-    quick score is within this of the cut (None = all four rotations for every one);
-    tokens_fn: runs the backbone's pass instead of PyTorch (openvino_cpu.filter_tokens).
+    quick score is within this of the cut (None = all rotations for every one);
+    tokens_fn: runs the backbone's pass instead of PyTorch (openvino_cpu.filter_tokens);
+    rotations: the crop rotations the features are averaged over (ROTATIONS, or
+    FAST_ROTATIONS in fast mode); the first is the cascade's quick look.
 
     stats: "blobs" (judged), "kept", "orphans" (judged), "orphans_kept", and for
     per-polygon scores "labels" (int32 (H, W), the blob or orphan each pixel belongs to,
     0 = none) with "real_prob" (per id: the classifier's probability that it is real,
     NaN where not judged; from the quick 1-rotation look for candidates it ruled out),
-    "finished" (candidates judged on all four rotations).
+    "finished" (candidates judged on all the rotations).
     """
     import cv2
     from scipy import ndimage as ndi
@@ -351,29 +363,31 @@ def filter_mask(prob, before, after, backbone, gsd, flt, device, low=0.6, redraw
     cascade = cascade_margin is not None
     # progress in (blob, rotation) items; until the quick look is done, assume every
     # candidate needs finishing, so the bar never moves back
-    work = [nu * (1 if cascade else 4), 3 * nu if cascade else 0]
+    rotations, nr = tuple(rotations), len(rotations)
+    r0, rest = rotations[0], rotations[1:]
+    work = [nu * (1 if cascade else nr), (nr - 1) * nu if cascade else 0]
 
     def report(offset, n_items):
         if progress_fn:
             return lambda c, t: progress_fn(offset + min(c * (_CROPS // 2), n_items), sum(work))
 
-    first = [(u, r) for u in range(nu) for r in ((0,) if cascade else range(4))]
+    first = [(u, r) for u in range(nu) for r in ((r0,) if cascade else rotations)]
     rot = fx.rotations(before, after, pix, gsd, first, report(0, len(first)), cancel_fn)
     if rot is None:
         return None, None
     finish = []
     if cascade and nu:
-        quick = score(flt, np.stack([rot[(u, 0)] for u in range(nu)]), np.array(p90))
+        quick = score(flt, np.stack([rot[(u, r0)] for u in range(nu)]), np.array(p90))
         finish = [u for u in range(nu) if quick[u] >= cut - cascade_margin]
-        work[1] = 3 * len(finish)
-        more = fx.rotations(before, after, pix, gsd, [(u, r) for u in finish for r in (1, 2, 3)],
+        work[1] = (nr - 1) * len(finish)
+        more = fx.rotations(before, after, pix, gsd, [(u, r) for u in finish for r in rest],
                             report(work[0], work[1]), cancel_fn)
         if more is None:
             return None, None
         rot.update(more)
     full = set(finish) if cascade else set(range(nu))
     # A candidate the quick look rules out keeps its 1-rotation features (and score).
-    feats = [fx.averaged([rot[(u, r)] for r in range(4)]) if u in full else rot[(u, 0)]
+    feats = [fx.averaged([rot[(u, r)] for r in rotations]) if u in full else rot[(u, r0)]
              for u in range(nu)]
     out = np.zeros(prob.shape, np.uint8)
     real_prob = np.full(n + m, np.nan, np.float32)

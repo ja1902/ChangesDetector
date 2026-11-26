@@ -234,6 +234,14 @@ def t_cli_extent(pair):
     assert p.returncode != 0 and "Area to process" in p.stdout
 
 
+@check("CLI: --fast runs the false-alarm filter on 2 rotations")
+def t_cli_fast(pair):
+    p, gpkg = run_cli(pair, "--fast")
+    assert p.returncode == 0, p.stdout[-500:] + p.stderr[-500:]
+    assert "need both rotations" in p.stdout, "the filter did not run on 2 rotations"
+    assert features(gpkg)[1], "no change found in fast mode"
+
+
 @check("CLI: --min-area-m2 drops smaller changes")
 def t_cli_min_area(pair):
     p, gpkg = run_cli(pair, "--min-area-m2", "1000000")
@@ -261,6 +269,7 @@ def main():
             t_cli_default(pair)
             t_cli_extent(pair)
             t_cli_min_area(pair)
+            t_cli_fast(pair)
     failed = [n for n, e in RESULTS if e is not None]
     print(f"\n{len(RESULTS) - len(failed)} of {len(RESULTS)} checks passed"
           + (": " + "; ".join(failed) if failed else ""))

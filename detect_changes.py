@@ -270,7 +270,8 @@ def build_parser():
                              "probability reaches P (faster; tiles with no likely change keep "
                              "the single pass; default: the preset's, 0 = every tile)")
     parser.add_argument("--fast", action="store_true",
-                        help="Fast mode: no flip averaging (about 4x faster, slightly less accurate). "
+                        help="Fast mode: no flip averaging (about 4x faster, slightly less accurate), and the "
+                             "false-alarm filter looks at 2 rotations of each change instead of 4. "
                              "Keeps the preset's upscaling (add --scale 1.0 to drop it too) and uses "
                              "the preset's fast-mode threshold")
     parser.add_argument("--logit-adjust", action="store_true", default=None,
@@ -701,7 +702,8 @@ def main():
     area_px, width_px = to_pixels(gsd or pixel_size_m(before_geo or after_geo),
                                   args.min_blob_m2, args.min_width_m)
     if args.filter_false_alarms:
-        from uchange_qgis_plugin.falsealarm_filter import filter_mask, load_filter
+        from uchange_qgis_plugin.falsealarm_filter import (FAST_ROTATIONS, ROTATIONS, filter_mask,
+                                                           load_filter)
         bf = preset["false_alarm_filter"]
         flt = load_filter(os.path.join(project_root, bf["file"]))
         # auto: the redraw threshold tested with the filter; a set threshold is used as is
@@ -714,6 +716,7 @@ def main():
         t1 = time.time()
         _log(f"False-alarm filter: changes at {low:.2f}, keep if judged real >= {min_score:.2f}, "
              f"outlines at {redraw:.2f}...")
+        rotations = FAST_ROTATIONS if args.fast else ROTATIONS
         tokens_fn = (openvino_cpu.filter_tokens(model.backbone, weights_path, flt["size"],
                                                 flt["layers"], torch.get_num_threads(), _log)
                      if use_ov else None)
@@ -721,11 +724,13 @@ def main():
             prob_map, before_img, after_img, model.backbone,
             gsd or pixel_size_m(before_geo or after_geo) or 0.5, flt, device,
             low=low, redraw=redraw, min_score=min_score, orphan_peak=orphan_peak,
-            progress_fn=lambda i, n: _progress(85 + int(10 * i / n)), tokens_fn=tokens_fn)
+            progress_fn=lambda i, n: _progress(85 + int(10 * i / n)), tokens_fn=tokens_fn,
+            rotations=rotations)
         weak = (f", and {fstats['orphans_kept']} of {fstats['orphans']} weaker ones"
                 if orphan_peak else "")
         _log(f"  kept {fstats['kept']} of {fstats['blobs']} changes{weak} ({time.time() - t1:.1f}s; "
-             f"{fstats['finished']} close enough to the cut to need all four rotations)")
+             f"{fstats['finished']} close enough to the cut to need "
+             f"{'all four rotations' if len(rotations) == 4 else 'both rotations'})")
         args.threshold = redraw
         scores = {"prob": prob_map, "filter_labels": fstats["labels"],
                   "filter_real": fstats["real_prob"]}

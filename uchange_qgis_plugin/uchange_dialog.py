@@ -218,7 +218,8 @@ class UChangeDialog(QDialog):
         self.fast_mode_check.setToolTip(
             "About 2x faster, slightly less accurate.\n"
             "Skips the flip averaging the recommended models normally use\n"
-            "(each image is processed once instead of four times)."
+            "(each image is processed once instead of four times),\n"
+            "and the false-alarm filter looks at 2 rotations of each change instead of 4."
         )
         proc_form.addRow("", self.fast_mode_check)
 
